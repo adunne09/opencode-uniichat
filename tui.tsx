@@ -3,7 +3,7 @@ import type { Context } from "@opencode/plugin/tui/context";
 import { Plugin } from "@opencode/plugin/tui";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
-import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { UniiChatRpc } from "./rpc.ts";
 
 const POLL_INTERVAL_MS = 2_000;
@@ -198,11 +198,64 @@ function Popup(props: { ctx: Context; sessionID: string }) {
   );
 }
 
+// Bumped after /unii on|off so the sidebar refreshes at once instead of at the next poll.
+const [stateVersion, bumpState] = createSignal(0);
+
+function SidebarIndicator(props: { ctx: Context; sessionID: string }) {
+  const ctx = props.ctx;
+  const [on, setOn] = createSignal<boolean>();
+  const [failed, setFailed] = createSignal(false);
+
+  createEffect(() => {
+    const sessionID = props.sessionID;
+    stateVersion();
+    setOn(undefined);
+    setFailed(false);
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      try {
+        const status = await rpcClient(ctx).status(
+          { sessionID },
+          { location: ctx.location, signal: controller.signal },
+        );
+        if (controller.signal.aborted) return;
+        setOn(status.on);
+        setFailed(false);
+      } catch {
+        if (!controller.signal.aborted) setFailed(true);
+      }
+      if (!controller.signal.aborted) timer = setTimeout(() => void poll(), POLL_INTERVAL_MS);
+    };
+    void poll();
+    onCleanup(() => {
+      controller.abort();
+      if (timer !== undefined) clearTimeout(timer);
+    });
+  });
+
+  const label = () => failed() ? "error" : on() === undefined ? "…" : on() ? "enabled" : "disabled";
+  const color = () => failed()
+    ? ctx.theme.text.feedback.error.base
+    : on() ? ctx.theme.text.feedback.success.base : ctx.theme.text.muted;
+
+  return (
+    <text>
+      <span style={{ fg: ctx.theme.text.muted }}>UniiChat: </span>
+      <span style={{ fg: color() }}>{label()}</span>
+    </text>
+  );
+}
+
 export default Plugin.define({
   id: "uniichat",
   setup(ctx) {
     if (!ctx.ui || typeof ctx.ui.slot !== "function") return;
-    return ctx.ui.slot({
+    const removeSidebar = ctx.ui.slot({
+      append: "sidebar.content",
+      render: (input) => <SidebarIndicator ctx={ctx} sessionID={input.sessionID} />,
+    });
+    const removeCommand = ctx.ui.slot({
       append: "app",
       render: () => {
         ctx.keymap.layer(() => ({
@@ -222,7 +275,19 @@ export default Plugin.define({
               }
               const route = ctx.ui.router.current();
               if (route.type !== "session") {
-                ctx.ui.toast.show({ variant: "error", message: "Open /unii from inside a session." });
+                if (argument === "off") {
+                  ctx.ui.toast.show({ variant: "warning", message: "No session open: nothing to turn off." });
+                  return;
+                }
+                // No session yet: start one with UniiChat already on, then open it.
+                try {
+                  const session = await ctx.client.session.create(ctx.location ? { location: ctx.location } : {});
+                  await rpcClient(ctx).set({ sessionID: session.id, on: true }, { location: ctx.location });
+                  ctx.ui.router.navigate({ type: "session", sessionID: session.id });
+                  ctx.ui.toast.show({ variant: "success", message: "New session with UniiChat on" });
+                } catch (cause) {
+                  ctx.ui.toast.show({ variant: "error", message: errorMessage(cause) });
+                }
                 return;
               }
               if (!argument) {
@@ -235,9 +300,10 @@ export default Plugin.define({
                   { sessionID: route.sessionID, on: argument === "on" },
                   { location: ctx.location },
                 );
+                bumpState((n) => n + 1);
                 ctx.ui.toast.show({
                   variant: "success",
-                  message: `UniiChat ${result.on ? "on" : "off"} — takes effect at the next turn`,
+                  message: `UniiChat ${result.on ? "on" : "off"} - takes effect at the next turn`,
                 });
               } catch (cause) {
                 ctx.ui.toast.show({ variant: "error", message: errorMessage(cause) });
@@ -248,5 +314,9 @@ export default Plugin.define({
         return null;
       },
     });
+    return () => {
+      removeSidebar();
+      removeCommand();
+    };
   },
 });
