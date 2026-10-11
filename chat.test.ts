@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Deferred, Effect, Fiber, Queue } from "effect";
 import { TestClock } from "effect/testing";
-import { Chat, type Deps, type Item } from "./chat.ts";
+import { Chat, COMPACT_TIMEOUT_MS, type Deps, type Item } from "./chat.ts";
 import type { Input, Output } from "./anthropic.ts";
 import { Store, StoreError } from "./store.ts";
 import { clipEcho, formatDate, utf8Size } from "./record.ts";
@@ -290,6 +290,30 @@ test("awaitSummarized retries with 1s then 2s backoff under TestClock", async ()
     yield* TestClock.adjust(1);
     yield* Fiber.join(wait);
     expect(calls).toBe(3);
+    expect(chat.status().pending).toBe(0);
+  }).pipe(Effect.provide(TestClock.layer())));
+});
+
+test("a hung compaction call times out and is retried instead of blocking awaitSummarized", async () => {
+  await run(Effect.gen(function* () {
+    let calls = 0;
+    const chat = yield* Chat.open(temp(), deps(() => ++calls === 1 ? Effect.never : Effect.succeed(output("summary"))));
+    yield* ready(chat);
+    yield* chat.log([item(0, "L".repeat(600))]);
+    yield* flush;
+    expect(chat.status().inFlight).toBe(1);
+    const wait = yield* Effect.forkChild(chat.awaitSummarized());
+    yield* flush;
+    yield* TestClock.adjust(COMPACT_TIMEOUT_MS - 1);
+    yield* flush;
+    expect(chat.status().failed).toBe(0);
+    yield* TestClock.adjust(1);
+    yield* flush;
+    expect(chat.status().failed).toBe(1);
+    expect(chat.status().lastError).toContain("timed out");
+    yield* TestClock.adjust(1000);
+    yield* Fiber.join(wait);
+    expect(calls).toBe(2);
     expect(chat.status().pending).toBe(0);
   }).pipe(Effect.provide(TestClock.layer())));
 });

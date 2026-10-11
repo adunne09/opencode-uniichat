@@ -26,6 +26,8 @@ export interface ToolResult {
 }
 type Usage = anthropic.Output["usage"] & { cost: number; ms: number };
 const emptyUsage = (): Usage => ({ input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0, ms: 0 });
+// A compaction call that hangs (no response, stalled stream) must not block awaitSummarized forever.
+export const COMPACT_TIMEOUT_MS = 4 * 60_000;
 const key = (ref: tree.Ref) => `${ref[0]}:${ref[1]}`;
 function extension(mime: string): string {
   const type = mime.split(";")[0]!.trim().toLowerCase();
@@ -263,7 +265,13 @@ export class Chat {
       return yield* Effect.gen(function* () {
         let shortest: string | undefined;
         for (let attempt = 0; attempt < 5; attempt++) {
-          const result = yield* self.deps.compact({ modelID: model.modelID, system, tools, turns, token: self.deps.token, ...(attempt === 0 ? { started } : {}) }).pipe(Effect.exit);
+          const result = yield* self.deps.compact({ modelID: model.modelID, system, tools, turns, token: self.deps.token, ...(attempt === 0 ? { started } : {}) }).pipe(
+            Effect.timeoutOrElse({
+              duration: COMPACT_TIMEOUT_MS,
+              orElse: () => Effect.fail(new ChatError({ message: `Compaction call timed out after ${COMPACT_TIMEOUT_MS / 1000}s` })),
+            }),
+            Effect.exit,
+          );
           // Release the wait even when a test adapter or failed transport has no headers.
           if (attempt === 0) yield* Deferred.succeed(started, undefined);
           if (Exit.isFailure(result)) {
