@@ -34,7 +34,8 @@ function fixture(initial: Row[], on = true) {
   const tools = new Map<string, { execute: (input: unknown, context: { sessionID: string }) => Effect.Effect<unknown, unknown> }>();
   let handlers: Record<string, (input: any) => Effect.Effect<any>>;
   const chat = {
-    log: (items: readonly Item[]) => Effect.sync(() => { logged.push(...items); }).pipe(
+    // Like the engine, a source already logged is skipped.
+    log: (items: readonly Item[]) => Effect.sync(() => { logged.push(...items.filter((item) => !logged.some((seen) => seen.src === item.src))); }).pipe(
       Effect.tap(() => items.some((item) => item.text === "last reply") ? Deferred.succeed(finalLogged, undefined) : Effect.void),
     ),
     logAgent: (_name: string, items: readonly Item[]) => Effect.sync(() => { agentLogged.push(...items); return undefined; }),
@@ -68,7 +69,7 @@ function fixture(initial: Row[], on = true) {
     rpc: { register: (_def: unknown, methods: typeof handlers) => Effect.sync(() => { handlers = methods; }) },
     event: { subscribe: () => Stream.fromQueue(events) },
   } as unknown as Plugin.Context;
-  const options: IntegrationOptions = { get: () => Effect.succeed(chat), sources: () => Effect.succeed(new Set()) };
+  const options: IntegrationOptions = { get: () => Effect.succeed(chat), sources: () => Effect.succeed(new Set()), older: () => Effect.succeed(undefined) };
   const event = (messages: Message[] = [msg("user", "task", "msg_new")], sid = sessionID): SessionContext => ({
     sessionID: sid, agent: "build" as SessionContext["agent"], model: {} as SessionContext["model"],
     system: [{ type: "text", text: "vanilla" }, { type: "text", text: "# Code Mode\n\ncatalog\n\nToday's date: ignore" }],
@@ -95,7 +96,8 @@ test("first request drops old turns; continuation keeps the frozen view and step
     expect(firstTexts[2]).toStartWith("Today's date:");
     expect(firstTexts.at(-1)).toBe("task");
     expect(Object.keys(first.tools)).toContain("zoom");
-    expect(f.logged.map((item) => item.src)).toEqual(["msg_new"]);
+    // The raw request drops the old turn; first switch-on imports it into memory instead.
+    expect(f.logged.map((item) => item.src)).toEqual(["msg_old", "msg_new"]);
     f.lines(["changed"]);
     f.rows([idle("msg_idle"), user("msg_new"), { type: "assistant", id: "msg_reply", content: [{ type: "text", text: "reply" }], agent: "build", model: { id: "model", providerID: "anthropic" }, time: { created: 1001 } }]);
     const next = f.event([msg("user", "task", "msg_new"), msg("assistant", "reply", "msg_reply")]);
@@ -131,7 +133,7 @@ test("disabled requests do not read history; on while busy waits for idle", asyn
     const enabled = f.event([msg("user", "next", "msg_next")]);
     yield* f.hooks.get("context")!(enabled);
     expect(enabled.system[0]!.text).toStartWith(SYSTEM_PROMPT);
-    expect(f.logged.map((item) => item.src)).toEqual(["msg_next"]);
+    expect(f.logged.map((item) => item.src)).toEqual(["msg_new", "msg_next"]);
   })));
 });
 
@@ -197,6 +199,43 @@ test("restart recovery logs only anchored segments, before freezing the new inpu
     const text = event.messages[0]!.content[0];
     expect(text.type === "text" && text.text).toContain("missed steering");
     expect(text.type === "text" && text.text).not.toContain("new input");
+  })));
+});
+
+test("first switch-on imports earlier vanilla turns, even before a checkpoint, into the frozen view", async () => {
+  const checkpoint: Row = { type: "compaction", id: "msg_cp", status: "completed", reason: "auto", summary: "summary", recent: "", time: { created: 1000 } };
+  const f = fixture([checkpoint, idle("msg_after_cp"), user("msg_new", "new input")]);
+  let asked = 0;
+  f.options.older = () => Effect.sync(() => {
+    asked++;
+    return [user("msg_v1", "first vanilla"), idle("msg_i1"), user("msg_v2", "second vanilla"), idle("msg_i2"), checkpoint, idle("msg_after_cp"), user("msg_new", "new input")];
+  });
+  const get = f.options.get!;
+  f.options.get = (sessionID, deps) => get(sessionID, deps).pipe(Effect.map((chat) => ({
+    ...chat,
+    renderView: () => blocks(f.logged.map((item, i) => `${i}+1|${item.text}`)),
+  })));
+  await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+    yield* integrate(f.ctx, f.options);
+    const event = f.event();
+    yield* f.hooks.get("context")!(event);
+    expect(f.logged.map((item) => item.src)).toEqual(["msg_v1", "msg_v2", "msg_new"]);
+    const text = event.messages[0]!.content[0];
+    expect(text.type === "text" && text.text).toContain("first vanilla");
+    expect(text.type === "text" && text.text).toContain("second vanilla");
+    expect(text.type === "text" && text.text).not.toContain("new input");
+    yield* f.hooks.get("context")!(f.event());
+    expect(asked).toBe(1);
+  })));
+});
+
+test("first switch-on falls back to the latest context when the full history is unreachable", async () => {
+  const f = fixture([user("msg_v1"), idle("msg_i1"), user("msg_new")]);
+  f.options.older = () => Effect.fail(new Error("no service"));
+  await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+    yield* integrate(f.ctx, f.options);
+    yield* f.hooks.get("context")!(f.event());
+    expect(f.logged.map((item) => item.src)).toEqual(["msg_v1", "msg_new"]);
   })));
 });
 

@@ -144,8 +144,20 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
       return history.selectLogged(parts, (id) => recorded.has(id), current);
     };
     if (!index.recovered) {
-      if (index.sources.size === 0) index.recovered = true;
-      else {
+      if (index.sources.size === 0) {
+        // First switch-on: an empty store means earlier turns of this session ran vanilla.
+        // Import them, from before any native compaction checkpoint when the full list is reachable,
+        // so memory starts at the start of the session rather than at /unii on.
+        const full = yield* (options.older ?? older)(sessionID, () => false).pipe(
+          Effect.catchCause((cause) => Effect.logWarning("UniiChat earlier-turn import fell back to the latest context", cause).pipe(Effect.as(undefined))),
+        );
+        const now = history.segments(rows).at(-1)!.ids;
+        const earlier = history.segments(full ?? rows).filter((part) => ![...part.ids].some((id) => now.has(id)));
+        for (const part of earlier) {
+          yield* log(sessionID, chat, part.rows.filter((row) => !excluded.has(row.id) && !now.has(row.id)));
+        }
+        index.recovered = true;
+      } else {
         const full = yield* (options.older ?? older)(sessionID, has);
         if (full) {
           for (const part of selected(full, false)) {
