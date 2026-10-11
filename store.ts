@@ -3,7 +3,6 @@ import { dirname, join, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { Path } from "@opencode/util/global";
 import { Data, Effect } from "effect";
-import { acquire, type LockHeld } from "./lock.ts";
 import type { LogRecord } from "./record.ts";
 import type { Ref } from "./tree.ts";
 import { serializeBatch } from "./view.ts";
@@ -158,10 +157,9 @@ function optional(path: string): string | undefined {
 export class Store {
   private constructor(readonly dir: string) {}
 
-  static open(dir: string): Effect.Effect<Store, StoreError | LockHeld> {
+  static open(dir: string): Effect.Effect<Store, StoreError> {
     return Effect.gen(function* () {
       yield* attempt("mkdir", dir, () => fs.mkdirSync(dir, { recursive: true }));
-      yield* acquire(join(dir, "chat.lock"));
       yield* attempt("mkdir", dir, () => {
         for (const name of ["main", "tree", "agents", "files"]) fs.mkdirSync(join(dir, name), { recursive: true });
       });

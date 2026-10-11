@@ -6,7 +6,6 @@ import * as view from "./view.ts";
 import * as prompts from "./prompts.ts";
 import { WorkQueue, isPrefix } from "./queue.ts";
 import { Store, chatDir, type Loaded, type StoreError } from "./store.ts";
-import type { LockHeld } from "./lock.ts";
 
 export interface Item {
   kind: record.Kind;
@@ -77,7 +76,7 @@ export class Chat {
     }
   }
 
-  static open = Effect.fn("Chat.open")(function* (dir: string, deps: Deps): Effect.fn.Return<Chat, StoreError | LockHeld> {
+  static open = Effect.fn("Chat.open")(function* (dir: string, deps: Deps): Effect.fn.Return<Chat, StoreError> {
     const store = yield* Store.open(dir);
     const chat = new Chat(store, deps, yield* store.load());
     yield* chat.recoverViews();
@@ -452,12 +451,12 @@ export class Chat {
   }
 }
 
-const registry = new Map<string, Deferred.Deferred<Chat, StoreError | LockHeld>>();
-export function get(sessionID: string, deps: Deps): Effect.Effect<Chat, StoreError | LockHeld> {
+const registry = new Map<string, Deferred.Deferred<Chat, StoreError>>();
+export function get(sessionID: string, deps: Deps): Effect.Effect<Chat, StoreError> {
   return Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
     let loaded = registry.get(sessionID);
     if (!loaded) {
-      loaded = Deferred.makeUnsafe<Chat, StoreError | LockHeld>();
+      loaded = Deferred.makeUnsafe<Chat, StoreError>();
       registry.set(sessionID, loaded);
       yield* Effect.forkDetach(Deferred.complete(loaded, Chat.open(chatDir(sessionID), deps)));
     }

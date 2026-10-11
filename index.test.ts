@@ -243,18 +243,18 @@ test("off, vanilla compaction, and on proceed after restart without discovery or
   })));
 });
 
-test("checkpoint cuts and lock failures fail with a user-facing message", async () => {
+test("checkpoint cuts and chat open failures fail with a user-facing message", async () => {
   const f = fixture([user("msg_new"), { type: "compaction", id: "msg_cp", status: "completed", reason: "auto", summary: "summary", recent: "", time: { created: 1000 } }]);
   await expect(Effect.runPromise(Effect.scoped(Effect.gen(function* () {
     yield* integrate(f.ctx, f.options);
     yield* f.hooks.get("context")!(f.event());
   })))).rejects.toThrow("turn cut");
-  const locked = fixture([user("msg_new")]);
-  locked.options.get = () => Effect.fail(new Error("UniiChat cannot lock chat.lock; another process may hold it."));
+  const broken = fixture([user("msg_new")]);
+  broken.options.get = () => Effect.fail(new Error("UniiChat cannot open the chat store."));
   await expect(Effect.runPromise(Effect.scoped(Effect.gen(function* () {
-    yield* integrate(locked.ctx, locked.options);
-    yield* locked.hooks.get("context")!(locked.event());
-  })))).rejects.toThrow("another process");
+    yield* integrate(broken.ctx, broken.options);
+    yield* broken.hooks.get("context")!(broken.event());
+  })))).rejects.toThrow("cannot open the chat store");
 });
 
 for (const state of ["fresh", "compacted", "failed"] as const) {
