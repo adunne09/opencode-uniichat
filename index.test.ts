@@ -8,7 +8,7 @@ import { DateTime, Deferred, Effect, Queue, Schema, Stream } from "effect";
 import { integrate, type IntegrationOptions } from "./index.ts";
 import type { Row, Item } from "./history.ts";
 import { blocks } from "./view.ts";
-import { SYSTEM_PROMPT } from "./prompts.ts";
+import { SUBAGENT_NOTE, SYSTEM_PROMPT } from "./prompts.ts";
 import { mkdtempSync } from "node:fs";
 import { Chat } from "./chat.ts";
 import { UniiChatRpc } from "./rpc.ts";
@@ -137,7 +137,7 @@ test("disabled requests do not read history; on while busy waits for idle", asyn
   })));
 });
 
-test("children use the parent's prompt and view, omit state, and retain native compaction", async () => {
+test("children keep their own prompt, get the view, omit state, and retain native compaction", async () => {
   const f = fixture([user("msg_new")]);
   await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
     yield* integrate(f.ctx, f.options);
@@ -145,7 +145,8 @@ test("children use the parent's prompt and view, omit state, and retain native c
     f.rows([user("msg_child")]);
     const child = f.event([Message.system("explore prompt"), msg("user", "child task", "msg_child")], f.childID);
     yield* f.hooks.get("context")!(child);
-    expect(child.system[0]!.text).toBe(f.system()!);
+    expect(child.system.map((part) => part.text)).toEqual(["vanilla", "# Code Mode\n\ncatalog\n\nToday's date: ignore", SUBAGENT_NOTE]);
+    expect(child.system.some((part) => part.text.includes(SYSTEM_PROMPT))).toBe(false);
     expect(child.messages).toHaveLength(1);
     const text = child.messages[0]!.content.flatMap((part) => part.type === "text" ? [part.text] : []);
     expect(text.at(-1)).toBe("child task");

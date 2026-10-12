@@ -14,7 +14,7 @@ import * as env from "./env.ts";
 import * as history from "./history.ts";
 import * as turn from "./turn.ts";
 import { chatDir } from "./store.ts";
-import { SYSTEM_PROMPT, systemText, stateText, ZOOM_DESCRIPTION, DATE_DESCRIPTION } from "./prompts.ts";
+import { SUBAGENT_NOTE, SYSTEM_PROMPT, systemText, stateText, ZOOM_DESCRIPTION, DATE_DESCRIPTION } from "./prompts.ts";
 import { UniiChatRpc, statusValue } from "./rpc.ts";
 
 export class IntegrationError extends Data.TaggedError("UniiChatIntegrationError")<{ message: string }> {}
@@ -224,9 +224,14 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
       }
       yield* reconcile(sessionID, chat, rows, true);
     }
-    const system = chat.system();
-    if (system === undefined) return yield* Effect.fail(error("UniiChat's parent system prompt is not initialized; start a parent turn first."));
-    event.system = [{ type: "text", text: system }];
+    if (child) {
+      // A child keeps its own agent's system prompt (D15, revised Oct 12); only a note on the view is added.
+      event.system = [...event.system, { type: "text", text: SUBAGENT_NOTE }];
+    } else {
+      const system = chat.system();
+      if (system === undefined) return yield* Effect.fail(error("UniiChat's system prompt is not initialized."));
+      event.system = [{ type: "text", text: system }];
+    }
     if (!child && history.cutTurn(rows)) return yield* Effect.fail(error("UniiChat turn cut by an OpenCode compaction checkpoint; the current raw turn is no longer available."));
     const reports = new Map(history.items(current.rows, { name: (childID) => nameFor(chat, current.rows, childID) })
       .filter((item) => item.kind === "work").map((item) => [item.src, item.text]));

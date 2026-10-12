@@ -118,6 +118,13 @@ least valuable items to fit before this cut:
 ${cutUtf8(cut, 512)}| ← LIMIT`;
 }
 
+export const SUBAGENT_NOTE = `You are a subagent working for Unii, an agent in a long chat with one user.
+Your first message starts with Unii's memory of that chat, inside <chat> tags, as
+one-line summaries "id+n|text" (the n messages from id on). It is context for
+your task only: use zoom(id, n) to open a line and date(id) for its time when you
+need a detail. Then comes your task: carry it out with your tools and end with
+your report as your final reply.`;
+
 export const ZOOM_DESCRIPTION = "Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole.";
 export const DATE_DESCRIPTION = "The date and time of message id.";
 
