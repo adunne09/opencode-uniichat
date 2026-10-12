@@ -69,6 +69,11 @@ export function items(rows: readonly Row[], opts: { name: (childID: string) => s
       result.push({ kind: "user", text: row.text, date, src: row.id, ...(files.length ? { files } : {}) });
       continue;
     }
+    if (row.type === "skill") {
+      // A skill the user invoked directly; logged so its instructions outlive the turn.
+      result.push({ kind: "user", text: row.text, date, src: row.id });
+      continue;
+    }
     if (row.type === "synthetic" && row.metadata?.source === "subagent") {
       if (typeof row.metadata.childID !== "string") throw new Error("Subagent report has no childID");
       result.push({ kind: "work", text: `[${opts.name(row.metadata.childID)}] ${subagentReport(row.text)}`, date, src: row.id });
@@ -165,6 +170,16 @@ export function extractCatalog(systemParts: readonly (SystemPart | string)[]): s
     if (!text.startsWith("# Code Mode") && !text.startsWith(EMPTY_CATALOG)) continue;
     const end = /\n\n(?=<mcp_instructions>|Project references provide additional directories|Skills provide specialized instructions|Instructions from: |Today's date: )/.exec(text);
     return end ? text.slice(0, end.index) : text;
+  }
+  return undefined;
+}
+
+/** OpenCode's skills section (`skill/instructions.ts` render()), or undefined when absent. */
+export function extractSkills(systemParts: readonly (SystemPart | string)[]): string | undefined {
+  for (const part of systemParts) {
+    const text = typeof part === "string" ? part : part.text;
+    const match = /(?:^|\n\n)(Skills provide specialized instructions[\s\S]*?(?:<\/available_skills>|No skills are currently available\.))/.exec(text);
+    if (match) return match[1];
   }
   return undefined;
 }

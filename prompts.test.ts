@@ -121,6 +121,8 @@ describe("recipe prompts", () => {
   });
   test("joins only present instructions in D13 order", () => {
     expect(systemText("prompt", "catalog", "agents")).toBe("prompt\n\ncatalog\n\nagents");
+    expect(systemText("prompt", "catalog", "agents", "skills")).toBe("prompt\n\ncatalog\n\nskills\n\nagents");
+    expect(systemText("prompt", undefined, "agents", "skills")).toBe("prompt\n\nskills\n\nagents");
     expect(systemText("prompt", "", "agents")).toBe("prompt\n\nagents");
     expect(systemText("", undefined, "agents")).toBe("agents");
     expect(systemText("")).toBe("");

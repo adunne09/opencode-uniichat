@@ -84,8 +84,8 @@ exactly. Tag each item with its kind ("user: ...; echo: ..."), and credit quoted
 text to its real author. Never make anything look further along than it was. If
 told the line is too long, shorten it. Non-ASCII characters cost 2-4 bytes.`;
 
-export const systemText = (prompt: string, catalog?: string, agentsMd?: string) => {
-  return [prompt, catalog, agentsMd].filter((part): part is string => !!part).join("\n\n");
+export const systemText = (prompt: string, catalog?: string, agentsMd?: string, skills?: string) => {
+  return [prompt, catalog, skills, agentsMd].filter((part): part is string => !!part).join("\n\n");
 };
 
 export const RULER = "-".repeat(512);

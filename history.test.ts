@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Message } from "@opencode/ai";
 import { blocks } from "./view.ts";
-import { buildRequest, cutTurn, EMPTY_CATALOG, extractCatalog, items, segments, selectLogged, subagentReport, turnKey, type RequestMessage, type Row } from "./history.ts";
+import { buildRequest, cutTurn, EMPTY_CATALOG, extractCatalog, extractSkills, items, segments, selectLogged, subagentReport, turnKey, type RequestMessage, type Row } from "./history.ts";
 
 const time = { created: 1700000000000 };
 const model = { id: "claude-sonnet-4-5", providerID: "anthropic" };
@@ -86,7 +86,7 @@ describe("history log items", () => {
     expect(items([error], { name }).at(-1)?.text).toBe("error: detail");
   });
 
-  test("subagent reports are work; shell and other control rows are omitted", () => {
+  test("subagent reports are work; user-invoked skills are user; shell and other control rows are omitted", () => {
     const rows: Row[] = [
       { type: "synthetic", id: "msg_report", text: wrapper("line one\n\nline two"), metadata: { source: "subagent", childID: "ses_child" }, time },
       { type: "synthetic", id: "msg_other", text: "ignore", time },
@@ -98,7 +98,10 @@ describe("history log items", () => {
       { type: "location-switched", id: "msg_location", location: { directory: "/work" }, time },
       checkpoint(), idle("msg_idle"),
     ];
-    expect(items(rows, { name })).toEqual([{ kind: "work", text: "[explore-1] line one\n\nline two", date: time.created, src: "msg_report" }]);
+    expect(items(rows, { name })).toEqual([
+      { kind: "work", text: "[explore-1] line one\n\nline two", date: time.created, src: "msg_report" },
+      { kind: "user", text: "instructions", date: time.created, src: "msg_skill" },
+    ]);
     for (const report of ["Subagent cancelled", "failed", "\n spaced \n", ""]) expect(subagentReport(wrapper(report))).toBe(report);
     for (const text of ["not wrapped", "<subagent broken>", "<subagent broken>\npartial"]) {
       expect(subagentReport(text)).toBe(text);
@@ -179,5 +182,28 @@ describe("Code Mode catalog", () => {
     expect(extractCatalog(["base", "Instructions from: /work/AGENTS.md"])).toBeUndefined();
     expect(extractCatalog([`base\n\n${catalog}`])).toBeUndefined();
     expect(extractCatalog(["No Code Mode tools are currently available."])).toBeUndefined();
+  });
+});
+
+describe("skills section", () => {
+  const skills = [
+    "Skills provide specialized instructions and workflows for specific tasks.",
+    "Use the skill tool to load a skill when a task matches its description.",
+    "<available_skills>",
+    "  <skill>",
+    "    <id>research</id>",
+    "    <name>research</name>",
+    "    <description>Look things up.\n\nThoroughly.</description>",
+    "  </skill>",
+    "</available_skills>",
+  ].join("\n");
+  const none = "Skills provide specialized instructions and workflows for specific tasks.\nNo skills are currently available.";
+  test("is cut from the combined instructions", () => {
+    expect(extractSkills(["base", `# Code Mode\n\ncatalog\n\n${skills}\n\nInstructions from: /work/AGENTS.md\nignored`])).toBe(skills);
+    expect(extractSkills([{ type: "text", text: `${none}\n\nToday's date: Fri Oct 09 2026` }])).toBe(none);
+  });
+  test("is absent without a skills header", () => {
+    expect(extractSkills(["base", "# Code Mode\n\ncatalog"])).toBeUndefined();
+    expect(extractSkills(["see Skills provide specialized instructions inline </available_skills>"])).toBeUndefined();
   });
 });

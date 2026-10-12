@@ -212,7 +212,7 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
       yield* chat.logAgent(name, turn.childItems(sessionID, history.items(rows, { name: (childID) => nameFor(chat, rows, childID) })));
     } else {
       if (first && (switchState.render || chat.system() === undefined)) {
-        yield* chat.setSystem(systemText(SYSTEM_PROMPT, history.extractCatalog(event.system), yield* env.agentsMd(location)));
+        yield* chat.setSystem(systemText(SYSTEM_PROMPT, history.extractCatalog(event.system), yield* env.agentsMd(location), history.extractSkills(event.system)));
         yield* ctx.storage.set(`session/${sessionID}`, { on: switchState.on });
       }
       yield* chat.setTools(Object.entries(event.tools).map(([name, tool]) => ({ name, ...tool })));
