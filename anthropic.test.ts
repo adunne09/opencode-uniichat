@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { AIError, CacheHint, Message, TransportError } from "@opencode/ai";
 import { RequestExecutor } from "@opencode/ai/route";
 import { Deferred, Effect, Fiber, Layer } from "effect";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { generate, layer, price, type Input } from "./anthropic.ts";
 
 function sse(texts: ReadonlyArray<string> = ["early text", "  final line\n"], thinking = true) {

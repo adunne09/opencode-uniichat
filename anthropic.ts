@@ -4,8 +4,8 @@ import { Anthropic } from "@opencode/ai/providers";
 import { RequestExecutor } from "@opencode/ai/route";
 import type { Service as LLMClientService } from "@opencode/ai/route/client";
 import { Effect, Deferred, Layer } from "effect";
-import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
-import * as HttpBody from "effect/unstable/http/HttpBody";
+import * as HttpClientRequest from "effect/http/HttpClientRequest";
+import * as HttpBody from "effect/http/HttpBody";
 import { buildRequestHeaders, rewriteRequestPayload } from "../../lib/anthropic-request.ts";
 
 export type Input = {
