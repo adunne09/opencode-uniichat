@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { Deferred, Effect, Fiber, Queue } from "effect";
 import { TestClock } from "effect/testing";
@@ -622,4 +622,53 @@ test("agent name gaps after restart cannot reuse an existing log", async () => {
   const reopened = await run(Chat.open(dir, deps()));
   expect(reopened.agentName("new", "explore")).toBe("explore-3");
   expect(reopened.agentName("child", "other")).toBe("explore-2");
+});
+
+test("rewind drops undone records, their nodes and files, archives them, and survives restart", async () => {
+  const dir = temp();
+  const chat = await run(Chat.open(dir, deps()));
+  await run(ready(chat));
+  const pic = { name: "p.png", mime: "image/png", data: new Uint8Array([7]) };
+  await run(chat.log([item(0), item(1), item(2), item(3), item(4), { ...item(5), files: [pic] }]));
+  await run(chat.awaitSummarized());
+  expect(chat.undoneFrom(() => true)).toBeUndefined();
+  expect(chat.undoneFrom(() => false)).toBeUndefined();
+  expect(chat.undoneFrom((base) => base !== "msg_4" && base !== "msg_5")).toBe(4);
+  expect(chat.undoneFrom((base) => ["msg_0", "msg_1", "msg_2"].includes(base))).toBe(3);
+  expect(await run(chat.rewind(3))).toEqual(["msg_3", "msg_4", "msg_5"]);
+  expect(chat.status().T).toBe(3);
+  expect(chat.renderView().tail).not.toContain("message 3");
+  await run(chat.log([item(6, "redo")]));
+  await run(chat.awaitSummarized());
+  const loaded = await run(load(dir));
+  expect(loaded.records.map((rec) => [rec.i, rec.src])).toEqual([[0, "msg_0:0"], [1, "msg_1:0"], [2, "msg_2:0"], [3, "msg_6:0"]]);
+  expect(loaded.nodes.every((node) => node.l > 0 || node.i < 4)).toBe(true);
+  expect(loaded.nodes.find((node) => node.l === 0 && node.i === 3)!.text).toBe("user: redo");
+  const reopened = await run(Chat.open(dir, deps()));
+  expect(reopened.renderView()).toEqual(chat.renderView());
+  expect((await run(reopened.zoom(3, 1))).text).toBe("user: redo");
+  const undone = readdirSync(join(dir, "undone"));
+  expect(undone).toHaveLength(1);
+  expect(readFileSync(join(dir, "undone", undone[0]!, "main.jsonl"), "utf8")).toContain("message 4");
+  expect(readdirSync(join(dir, "undone", undone[0]!, "files"))).toEqual(["5-0.png"]);
+  expect(readdirSync(join(dir, "files"))).toEqual([]);
+});
+
+test("a compaction started before a rewind is dropped, and its slot is rebuilt from the new record", async () => {
+  await run(Effect.gen(function* () {
+    const fake = yield* controlled();
+    const chat = yield* Chat.open(temp(), fake.deps);
+    yield* ready(chat);
+    yield* chat.log([item(0), item(1, "L".repeat(600))]);
+    const stale = yield* Queue.take(fake.calls);
+    yield* chat.rewind(1);
+    yield* chat.log([item(2, "M".repeat(600))]);
+    const fresh = yield* Queue.take(fake.calls);
+    yield* Deferred.succeed(stale.reply, output("stale summary"));
+    yield* flush;
+    yield* Deferred.succeed(fresh.reply, output("fresh summary"));
+    yield* chat.awaitSummarized();
+    expect(chat.renderView().tail).toContain("1+1|fresh summary");
+    expect(chat.renderView().tail).not.toContain("stale");
+  }));
 });

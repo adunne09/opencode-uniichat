@@ -18,7 +18,7 @@ import { SUBAGENT_NOTE, SYSTEM_PROMPT, systemText, stateText, ZOOM_DESCRIPTION, 
 import { UniiChatRpc, statusValue } from "./rpc.ts";
 
 export class IntegrationError extends Data.TaggedError("UniiChatIntegrationError")<{ message: string }> {}
-type Chat = Pick<engine.Chat, "log" | "logAgent" | "agentName" | "system" | "setSystem" | "setTools" | "awaitSummarized" | "renderView" | "zoom" | "date" | "status">;
+type Chat = Pick<engine.Chat, "log" | "logAgent" | "agentName" | "system" | "setSystem" | "setTools" | "awaitSummarized" | "renderView" | "zoom" | "date" | "status" | "undoneFrom" | "rewind">;
 export interface IntegrationOptions {
   get?: (sessionID: string, deps: engine.Deps) => Effect.Effect<Chat, unknown>;
   sources?: (sessionID: string) => Effect.Effect<Set<string>, unknown>;
@@ -175,6 +175,21 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
     }
     for (const part of selected(rows, current)) yield* log(sessionID, chat, part.rows.filter((row) => !excluded.has(row.id)));
   });
+  // OpenCode's /undo deletes the undone messages when the next prompt commits it. Drop their
+  // records too, so memory matches the session and the restored files (amends "never delete").
+  const dropUndone = Effect.fn(function* (sessionID: string, chat: Chat, rows: readonly history.Row[]) {
+    const present = new Set<string>();
+    for (const row of rows) {
+      present.add(row.id);
+      if (row.type === "assistant") for (const part of row.content) if (part.type === "tool") present.add(part.id);
+    }
+    const k = chat.undoneFrom((base) => present.has(base));
+    if (k === undefined) return;
+    const dropped = yield* chat.rewind(k);
+    const index = indexes.get(sessionID);
+    if (index) for (const base of dropped) index.sources.delete(base);
+    yield* Effect.logInfo(`UniiChat dropped records from ${k} on: their messages were undone`);
+  });
   const set = (sessionID: string, on: boolean) => serialized(sessionID, Effect.gen(function* () {
     const rows = on ? yield* readHistory(sessionID) : [];
     const memo = turn.switchMemo(on, history.turnKey(rows), rows, memos.get(sessionID));
@@ -216,6 +231,7 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
         yield* ctx.storage.set(`session/${sessionID}`, { on: switchState.on });
       }
       yield* chat.setTools(Object.entries(event.tools).map(([name, tool]) => ({ name, ...tool })));
+      yield* dropUndone(sessionID, chat, rows);
       if (first) {
         // The current input must not enter the view frozen for this turn.
         yield* reconcile(sessionID, chat, rows, false, current.ids);

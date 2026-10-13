@@ -44,7 +44,9 @@ export class Chat {
   private readonly unpersisted = new Map<string, { ref: tree.Ref; text: string }>();
   private readonly agents: Map<string, record.LogRecord[]>;
   private readonly names = new Map<string, string>();
-  private readonly queue: WorkQueue;
+  private queue: WorkQueue;
+  // Rewind points, one per epoch; a build started in an older epoch is dropped if it covers one.
+  private readonly cuts: number[] = [];
   private chat: view.View;
   private comp: view.View;
   private systemText: string | undefined;
@@ -308,9 +310,15 @@ export class Chat {
   private build(ref: tree.Ref): Effect.Effect<void> {
     const self = this;
     return Effect.gen(function* () {
+      const epoch = self.cuts.length;
       const retained = self.unpersisted.get(key(ref));
       const result = yield* (retained ? Effect.succeed(retained.text) : self.compact(ref)).pipe(Effect.exit);
       yield* self.mutex.withPermits(1)(Effect.gen(function* () {
+        if (self.cuts.slice(epoch).some((k) => tree.last(...ref) >= k)) {
+          // The records this node summarized were undone while it was being built.
+          yield* self.notify();
+          return;
+        }
         const saved = Exit.isSuccess(result) ? yield* self.persist(ref, result.value).pipe(Effect.exit) : result;
         if (Exit.isSuccess(saved)) {
           self.queue.built(ref);
@@ -327,6 +335,47 @@ export class Chat {
       self.lastError = Cause.pretty(cause);
       yield* self.notify();
     })), Effect.uninterruptible);
+  }
+
+  // The first record whose message is gone from the session after an undo (the log tail whose
+  // sources are absent, after the last record still present); undefined if nothing was undone or
+  // no record is present at all (e.g. the session context starts after a checkpoint).
+  undoneFrom(present: (base: string) => boolean): number | undefined {
+    for (let i = this.T - 1; i >= 0; i--) {
+      if (present(this.records.get(i)!.src.split(":")[0]!)) return i + 1 < this.T ? i + 1 : undefined;
+    }
+    return undefined;
+  }
+
+  // Drop records [k, T) from the log, tree and views (OpenCode undo). Returns the dropped src bases.
+  rewind(k: number) {
+    const self = this;
+    return this.mutex.withPermits(1)(Effect.gen(function* () {
+      if (!Number.isSafeInteger(k) || k < 0 || k >= self.T) return [] as string[];
+      const chat = view.cut(self.chat.lines, k);
+      const comp = view.cut(self.comp.lines, k);
+      yield* self.store.rewind(k, chat, comp, { chat: false, compaction: false });
+      const bases = new Set<string>();
+      for (let i = k; i < self.T; i++) {
+        const rec = self.records.get(i)!;
+        bases.add(rec.src.split(":")[0]!);
+        if (self.src.get(rec.src) === i) self.src.delete(rec.src);
+        self.records.delete(i);
+      }
+      for (const [id, node] of [...self.texts.keys()].map((id) => [id, id.split(":").map(Number) as [number, number]] as const)) {
+        if (tree.last(...node) >= k) self.texts.delete(id);
+      }
+      for (const [id, { ref }] of [...self.unpersisted]) if (tree.last(...ref) >= k) self.unpersisted.delete(id);
+      self.cuts.push(k);
+      self.T = k;
+      const built = [...self.texts.keys()].map((id) => id.split(":").map(Number) as unknown as tree.Ref);
+      self.queue = WorkQueue.restore(k, built);
+      self.pending = k - built.filter((ref) => ref[0] === 0).length;
+      self.chat = view.createView(chat, false, self.lookup);
+      self.comp = view.createView(comp, false, self.lookup);
+      yield* self.notify();
+      return [...bases];
+    }).pipe(Effect.uninterruptible));
   }
 
   awaitSummarized() {

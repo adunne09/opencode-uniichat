@@ -47,6 +47,11 @@ function fixture(initial: Row[], on = true) {
     renderView: () => blocks(lines),
     zoom: () => Effect.succeed({ text: "original", files: [{ mime: "image/png", data: new Uint8Array([1, 2]) }] }),
     date: () => Effect.succeed({ text: "date" }),
+    undoneFrom: (present: (base: string) => boolean) => {
+      for (let i = logged.length - 1; i >= 0; i--) if (present(logged[i]!.src.split(":")[0]!)) return i + 1 < logged.length ? i + 1 : undefined;
+      return undefined;
+    },
+    rewind: (k: number) => Effect.sync(() => logged.splice(k).map((item) => item.src.split(":")[0]!)),
     status: () => ({ T: 0, viewBytes: 0, compViewBytes: 0, lines: 0, inFlight: 0, pending: 0, failed: 0, lastError: undefined, last: undefined, total: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0, ms: 0 } }),
   };
   let contextReads = 0;
@@ -364,5 +369,23 @@ test("status projects finite wire usage without leaking undefined, DateTime, or 
       expect(status.chat.total.ms).toBe(0);
       expect(status.lastTurn).toEqual({ input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0, ...(completed === undefined ? {} : { ms: 500 }) });
     }
+  })));
+});
+
+test("an undone turn is dropped from memory before the next turn, and the redo is logged", async () => {
+  const reply = (id: string, text: string): Row => ({ type: "assistant", id, content: [{ type: "text", text }], agent: "build", model: { id: "model", providerID: "anthropic" }, time: { created: 1001 } });
+  const f = fixture([user("msg_a")]);
+  await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+    yield* integrate(f.ctx, f.options);
+    yield* f.hooks.get("context")!(f.event([msg("user", "task", "msg_a")]));
+    f.rows([user("msg_a"), reply("msg_ra", "a done"), idle("msg_i1"), user("msg_b"), reply("msg_rb", "b done")]);
+    yield* f.hooks.get("context")!(f.event([msg("user", "task", "msg_b")]));
+    expect(f.logged.map((item) => item.text)).toEqual(["task", "a done", "task", "b done"]);
+    // /undo of msg_b, committed by the next prompt: OpenCode deleted msg_b and its reply.
+    f.rows([user("msg_a"), reply("msg_ra", "a done"), idle("msg_i1"), user("msg_c", "redo")]);
+    const redo = f.event([msg("user", "redo", "msg_c")]);
+    yield* f.hooks.get("context")!(redo);
+    expect(f.logged.map((item) => item.text)).toEqual(["task", "a done", "redo"]);
+    expect(redo.messages.map((message) => message.id)).toEqual(["msg_c"]);
   })));
 });

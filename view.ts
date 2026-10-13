@@ -1,5 +1,5 @@
 import { utf8Size } from "./record.ts";
-import { first, last, name, type Ref } from "./tree.ts";
+import { children, first, last, name, type Ref } from "./tree.ts";
 
 export type Lookup = (l: number, i: number) => string | undefined;
 export interface View {
@@ -137,3 +137,15 @@ export function blocks(lines: readonly string[]) {
 export const serialize = (view: View): [number, number][] => view.lines.map(([l, i]) => [l, i]);
 export const deserialize = (lines: readonly (readonly number[])[], pending = false, lookup?: Lookup): View => createView(lines.map(([l, i]) => [l, i]), pending, lookup);
 export const serializeBatch = (chat: boolean, compaction: boolean) => ({ chat, compaction });
+
+// The lines of a view cut back to records [0, k): lines past k go, a line straddling k opens into its children.
+export function cut(lines: readonly Ref[], k: number): Ref[] {
+  const out: Ref[] = [];
+  const add = (ref: Ref): void => {
+    if (first(...ref) >= k) return;
+    if (last(...ref) < k) out.push(ref);
+    else for (const child of children(ref)) add(child);
+  };
+  for (const ref of lines) add(ref);
+  return out;
+}

@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { Path } from "@opencode/util/global";
 import { Data, Effect } from "effect";
 import type { LogRecord } from "./record.ts";
-import type { Ref } from "./tree.ts";
+import { last, type Ref } from "./tree.ts";
 import { serializeBatch } from "./view.ts";
 
 export class StoreError extends Data.TaggedError("StoreError")<{
@@ -128,7 +128,7 @@ function jsonl<A>(path: string, torn: TornLine[]): A[] {
   return result;
 }
 
-function append(path: string, value: unknown): void {
+function append(path: string, value: unknown, raw?: string): void {
   const fd = fs.openSync(path, "a+", 0o600);
   try {
     const size = fs.fstatSync(fd).size;
@@ -137,7 +137,7 @@ function append(path: string, value: unknown): void {
       // Flush the separator before a new record can follow a torn line.
       writeAll(fd, Buffer.from("\n"));
     }
-    writeAll(fd, Buffer.from(`${JSON.stringify(value)}\n`));
+    writeAll(fd, Buffer.from(`${raw ?? JSON.stringify(value)}\n`));
   } finally { fs.closeSync(fd); }
 }
 
@@ -216,6 +216,41 @@ export class Store {
         JSON.stringify(comp),
         JSON.stringify(serializeBatch(batch.chat, batch.compaction)),
       ]);
+    });
+  }
+
+  // Undo in OpenCode deleted the turns from record k on. Move their records, the tree nodes that
+  // cover them and their attachments to undone/<stamp>/, so record k can be written again.
+  // Order matters for crash safety: tree and files first, then the views, then the log.
+  // A crash in between leaves extra records that the next rewind removes again.
+  rewind(k: number, chat: readonly Ref[], comp: readonly Ref[], batch: Batch): Effect.Effect<void, StoreError> {
+    return attempt("rewind", this.dir, () => {
+      const archive = join(this.dir, "undone", new Date().toISOString().replace(/[:.]/g, "-"));
+      fs.mkdirSync(join(archive, "files"), { recursive: true });
+      const cut = (name: string, drop: (value: any) => boolean) => {
+        const dir = join(this.dir, name);
+        for (const file of fs.readdirSync(dir).filter((s) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(s)).sort()) {
+          const path = join(dir, file);
+          const keep: string[] = [];
+          const gone: string[] = [];
+          for (const line of fs.readFileSync(path, "utf8").split("\n")) {
+            if (line === "") continue;
+            let value: unknown;
+            try { value = JSON.parse(line); } catch { keep.push(line); continue; }
+            (drop(value) ? gone : keep).push(line);
+          }
+          if (!gone.length) continue;
+          append(join(archive, `${name}.jsonl`), undefined, gone.join("\n"));
+          atomic(path, keep.map((line) => `${line}\n`).join(""));
+        }
+      };
+      cut("tree", (node: StoredNode) => last(node.l, node.i) >= k);
+      for (const file of fs.readdirSync(join(this.dir, "files"))) {
+        const match = /^(\d+)-\d+\./.exec(file);
+        if (match && Number(match[1]) >= k) fs.renameSync(join(this.dir, "files", file), join(archive, "files", file));
+      }
+      snapshot(this.dir, [JSON.stringify(chat), JSON.stringify(comp), JSON.stringify(serializeBatch(batch.chat, batch.compaction))]);
+      cut("main", (rec: LogRecord) => rec.i >= k);
     });
   }
 
