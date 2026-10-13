@@ -125,6 +125,16 @@ your task only: use zoom(id, n) to open a line and date(id) for its time when yo
 need a detail. Then comes your task: carry it out with your tools and end with
 your report as your final reply.`;
 
+export const BTW_LOOKUP_NOTE = `[Before this side question is answered: if your memory above lacks a detail
+you need, open it now with zoom(id, n) or date(id); no other tool is available.
+When you have what you need, or need nothing, reply only READY. The answer comes
+in the next request.]`;
+
+export function btwMemory(opened: readonly { call: string; text: string }[]) {
+  if (opened.length === 0) return undefined;
+  return `Memory opened for this question:\n\n${opened.map((item) => `> ${item.call}\n${item.text}`).join("\n\n")}`;
+}
+
 export const ZOOM_DESCRIPTION = "Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole.";
 export const DATE_DESCRIPTION = "The date and time of message id.";
 

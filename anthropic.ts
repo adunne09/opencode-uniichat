@@ -108,3 +108,27 @@ export const generate = Effect.fn("UniiChat.Anthropic.generate")(function* (inpu
   effect,
   input.started ? Deferred.succeed(input.started, undefined) : Effect.void,
 ));
+
+// One raw model call with a full message list, for the /btw memory lookup.
+export const step = Effect.fn("UniiChat.Anthropic.step")(function* (input: {
+  modelID: string;
+  system: string;
+  tools: ReadonlyArray<{ name: string; description: string; input: unknown }>;
+  messages: ReadonlyArray<Message>;
+  token: Effect.Effect<string>;
+}): Effect.fn.Return<Message, AIError, LLMClientService> {
+  const once = (token: string) => LLM.generate({
+    model: Anthropic.model(input.modelID, { authToken: token }),
+    system: [{ type: "text", text: input.system }],
+    tools: input.tools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.input as ToolDefinition["inputSchema"],
+    })),
+    messages: [...input.messages],
+    generation: { maxTokens: 4000 },
+  });
+  const token = yield* input.token;
+  const response = yield* once(token).pipe(Effect.catchReason("AI.Error", "Authentication", () => input.token.pipe(Effect.flatMap(once))));
+  return response.message;
+});

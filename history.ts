@@ -162,6 +162,24 @@ export function buildRequest(input: RequestInput): RequestMessage[] {
   return messages;
 }
 
+// A /btw request: the view, the raw turn still in progress (if any), then the question.
+// Unlike a turn request it never fails: with no turn in progress only the view precedes the question.
+export function btwRequest(input: {
+  messages: readonly RequestMessage[];
+  turnIds: ReadonlySet<string>;
+  view: { blocks: readonly string[]; tail: string };
+  reports: ReadonlyMap<string, string>;
+  extra?: string;
+}): RequestMessage[] {
+  const question = input.messages.at(-1);
+  if (!question || question.role !== "user") throw new Error("UniiChat /btw request has no question.");
+  const start = input.messages.findIndex((message) => message.id !== undefined && input.turnIds.has(message.id));
+  const raw = start < 0 ? [] : input.messages.slice(start, -1);
+  const last = input.extra === undefined ? question : { ...question, content: [...question.content, { type: "text", text: input.extra } as ContentPart] };
+  // `child` builds from the first message on and adds no per-turn state, which is what a side question needs.
+  return buildRequest({ messages: [...raw, last], turnIds: input.turnIds, view: input.view, reports: input.reports, child: true });
+}
+
 export const EMPTY_CATALOG = "No Code Mode tools are currently available. Later Code Mode catalog updates may add or remove tools. Do not call `execute` unless there is at least one available Code Mode tool.";
 
 export function extractCatalog(systemParts: readonly (SystemPart | string)[]): string | undefined {

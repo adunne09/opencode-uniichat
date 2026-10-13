@@ -389,3 +389,26 @@ test("an undone turn is dropped from memory before the next turn, and the redo i
     expect(redo.messages.map((message) => message.id)).toEqual(["msg_c"]);
   })));
 });
+
+test("/btw gets Unii's prompt and memory instead of the whole session; off or child stays vanilla", async () => {
+  const f = fixture([user("msg_old"), idle("msg_idle"), user("msg_new")]);
+  await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+    yield* integrate(f.ctx, f.options);
+    yield* f.hooks.get("context")!(f.event([msg("user", "old", "msg_old"), msg("user", "task", "msg_new")]));
+    f.rows([user("msg_old"), idle("msg_idle"), user("msg_new"), { type: "assistant", id: "msg_reply", content: [{ type: "text", text: "reply" }], agent: "build", model: { id: "model", providerID: "anthropic" }, time: { created: 1001 } }, idle("msg_end")]);
+    const btw = f.event([msg("user", "old", "msg_old"), msg("user", "task", "msg_new"), msg("assistant", "reply", "msg_reply"), Message.user("side question?")]);
+    yield* f.hooks.get("generate")!(btw);
+    expect(btw.system).toEqual([{ type: "text", text: f.system()! }]);
+    expect(btw.messages).toHaveLength(1);
+    const parts = btw.messages[0]!.content.flatMap((part) => part.type === "text" ? [part.text] : []);
+    expect(parts[0]).toContain("0+1|old");
+    expect(parts.at(-1)).toBe("side question?");
+    expect(parts.join("")).not.toContain("reply");
+    yield* f.rpc().set({ sessionID: f.sessionID, on: false });
+    f.rows([idle("msg_x"), user("msg_y")]);
+    const off = f.event([msg("user", "old", "msg_old"), Message.user("q")]);
+    yield* f.hooks.get("generate")!(off);
+    expect(off.system[0]!.text).toBe("vanilla");
+    expect(off.messages).toHaveLength(2);
+  })));
+});

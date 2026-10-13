@@ -14,7 +14,7 @@ import * as env from "./env.ts";
 import * as history from "./history.ts";
 import * as turn from "./turn.ts";
 import { chatDir } from "./store.ts";
-import { SUBAGENT_NOTE, SYSTEM_PROMPT, systemText, stateText, ZOOM_DESCRIPTION, DATE_DESCRIPTION } from "./prompts.ts";
+import { BTW_LOOKUP_NOTE, btwMemory, SUBAGENT_NOTE, SYSTEM_PROMPT, systemText, stateText, ZOOM_DESCRIPTION, DATE_DESCRIPTION } from "./prompts.ts";
 import { UniiChatRpc, statusValue } from "./rpc.ts";
 
 export class IntegrationError extends Data.TaggedError("UniiChatIntegrationError")<{ message: string }> {}
@@ -257,6 +257,56 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
       catch: error,
     })).map((message) => Message.make(message));
   })).pipe(Effect.orDie));
+
+  // /btw (session.generate) runs one model call with no tool loop. Give it Unii's prompt, the view
+  // and the raw turn in progress instead of OpenCode's whole uncompacted history, which Unii keeps
+  // growing because native compaction is skipped. zoom/date run here first, in a lookup loop of our own.
+  const LOOKUP_STEPS = 8;
+  const lookup = Effect.fn(function* (chat: Chat, input: { modelID: string; system: string; tools: Record<string, { description: string; input: unknown }>; messages: Message[] }) {
+    const tools = Object.entries(input.tools).filter(([name]) => name === "zoom" || name === "date").map(([name, tool]) => ({ name, description: tool.description, input: tool.input }));
+    const convo = [...input.messages];
+    const opened: { call: string; text: string }[] = [];
+    for (let i = 0; i < LOOKUP_STEPS; i++) {
+      const reply = yield* anthropic.step({ modelID: input.modelID, system: input.system, tools, messages: convo, token: deps.token }).pipe(Effect.provide(compactor));
+      const calls = reply.content.flatMap((part) => part.type === "tool-call" ? [part] : []);
+      if (calls.length === 0 || calls.some((call) => call.name !== "zoom" && call.name !== "date")) break;
+      convo.push(reply);
+      for (const call of calls) {
+        const args = (call.input ?? {}) as { id?: number | string; n?: number };
+        const text = yield* (call.name === "zoom" ? chat.zoom(args.id as number | string, args.n) : chat.date(args.id as number)).pipe(
+          Effect.map((result) => result.text),
+          Effect.catchCause((cause) => Effect.succeed(`Error: ${Cause.pretty(cause)}`)),
+        );
+        opened.push({ call: `${call.name}(${JSON.stringify(call.input)})`, text });
+        convo.push(Message.tool({ id: call.id, name: call.name, result: text, resultType: "text" }));
+      }
+    }
+    return opened;
+  });
+  yield* ctx.session.hook("generate", (event) => Effect.gen(function* () {
+    const sessionID = event.sessionID;
+    if ((yield* parent(sessionID)) !== undefined || !(yield* isEnabled(sessionID))) return;
+    const rows = yield* readHistory(sessionID);
+    const memo = memos.get(sessionID);
+    // A running turn keeps the mode it started in; otherwise the switch decides, as the next turn would.
+    if (!(memo?.key === history.turnKey(rows) ? memo.enabled : (yield* state(sessionID)).on)) return;
+    const chat = yield* get(sessionID);
+    const system = chat.system();
+    if (system === undefined) return;
+    const current = history.segments(rows).at(-1)!;
+    // Mid-turn, the view frozen for this turn excludes its raw messages; between turns they are all in the log.
+    const view = current.rows.length > 0 && memo?.key === history.turnKey(rows) && memo.frozen ? memo.frozen : chat.renderView();
+    const reports = new Map(history.items(current.rows, { name: (childID) => nameFor(chat, current.rows, childID) })
+      .filter((item) => item.kind === "work").map((item) => [item.src, item.text]));
+    const build = (extra?: string) => history.btwRequest({ messages: event.messages, turnIds: current.ids, view, reports, extra }).map((message) => Message.make(message));
+    const opened = event.model.providerID === "anthropic"
+      ? yield* lookup(chat, { modelID: event.model.id, system, tools: event.tools, messages: build(BTW_LOOKUP_NOTE) }).pipe(
+        Effect.catchCause((cause) => Effect.logWarning("UniiChat /btw memory lookup failed; answering from the view", cause).pipe(Effect.as([]))),
+      )
+      : [];
+    event.system = [{ type: "text", text: system }];
+    event.messages = build(btwMemory(opened));
+  }).pipe(Effect.orDie));
 
   yield* ctx.session.hook("compaction", Effect.fn(function* (event) {
     if (!(yield* parent(event.sessionID)) && (yield* isEnabled(event.sessionID))) event.result = { summary: "UniiChat is on; native compaction is skipped." };

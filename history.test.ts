@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Message } from "@opencode/ai";
 import { blocks } from "./view.ts";
-import { buildRequest, cutTurn, EMPTY_CATALOG, extractCatalog, extractSkills, items, segments, selectLogged, subagentReport, turnKey, type RequestMessage, type Row } from "./history.ts";
+import { btwRequest, buildRequest, cutTurn, EMPTY_CATALOG, extractCatalog, extractSkills, items, segments, selectLogged, subagentReport, turnKey, type RequestMessage, type Row } from "./history.ts";
 
 const time = { created: 1700000000000 };
 const model = { id: "claude-sonnet-4-5", providerID: "anthropic" };
@@ -205,5 +205,23 @@ describe("skills section", () => {
   test("is absent without a skills header", () => {
     expect(extractSkills(["base", "# Code Mode\n\ncatalog"])).toBeUndefined();
     expect(extractSkills(["see Skills provide specialized instructions inline </available_skills>"])).toBeUndefined();
+  });
+});
+
+describe("btw request", () => {
+  const view = blocks(["0+1|old", "1+1|old", "2+1|old", "3+1|old"]);
+  test("mid-turn: view, raw turn, question; earlier history dropped", () => {
+    const out = btwRequest({ messages: [msg("user", "msg_old", "old"), msg("user", "msg_new"), msg("assistant", "msg_a", "working"), msg("user", undefined, "side?")], turnIds: new Set(["msg_new", "msg_a"]), view, reports: new Map() });
+    expect(out.map((message) => message.id)).toEqual(["msg_new", "msg_a", undefined]);
+    expect(texts(out[0]!)[0]).toContain("0+1|old");
+    expect(texts(out[0]!).at(-1)).toBe("task");
+    expect(texts(out[2]!)).toEqual(["side?"]);
+  });
+  test("between turns: only the view and the question, with extra text appended", () => {
+    const out = btwRequest({ messages: [msg("user", "msg_old", "old"), msg("assistant", "msg_r", "reply"), msg("user", undefined, "side?")], turnIds: new Set(), view, reports: new Map(), extra: "note" });
+    expect(out).toHaveLength(1);
+    expect(texts(out[0]!)[0]).toContain("0+1|old");
+    expect(texts(out[0]!).slice(-2)).toEqual(["side?", "note"]);
+    expect(texts(out[0]!).join("")).not.toContain("reply");
   });
 });
