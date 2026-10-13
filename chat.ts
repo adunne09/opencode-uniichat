@@ -286,7 +286,7 @@ export class Chat {
           const line = out.text?.trim();
           if (line === undefined) {
             if (shortest !== undefined) return shortest;
-            return yield* Effect.fail(new ChatError({ message: "Compaction returned no text" }));
+            return yield* Effect.fail(new ChatError({ message: noTextMessage(out) }));
           }
           if (shortest === undefined || record.utf8Size(line) < record.utf8Size(shortest)) shortest = line;
           if (record.utf8Size(line) <= 512) return line;
@@ -323,6 +323,8 @@ export class Chat {
         if (Exit.isSuccess(saved)) {
           self.queue.built(ref);
           self.refreshSizes();
+          // A retried node succeeded: the error no longer describes the chat's state.
+          if (self.queue.failedNodes.size === 0) self.lastError = undefined;
         } else {
           self.queue.failed(ref);
           self.lastError = Cause.pretty(saved.cause);
@@ -506,6 +508,15 @@ export class Chat {
       ...(this.last === undefined ? {} : { last: { ...this.last } }), total: { ...this.total },
     };
   }
+}
+
+export function noTextMessage(out: anthropic.Output) {
+  const why = [
+    out.finish ? `stop ${out.finish}` : undefined,
+    out.toolCalls?.length ? `called ${out.toolCalls.join(", ")}` : undefined,
+    `${out.usage.output} output tokens (${out.usage.reasoning} reasoning)`,
+  ].filter(Boolean).join(", ");
+  return `Compaction returned no text: ${why}`;
 }
 
 const registry = new Map<string, Deferred.Deferred<Chat, StoreError>>();

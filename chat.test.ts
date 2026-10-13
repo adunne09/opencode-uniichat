@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { Deferred, Effect, Fiber, Queue } from "effect";
 import { TestClock } from "effect/testing";
-import { Chat, COMPACT_TIMEOUT_MS, type Deps, type Item } from "./chat.ts";
+import { Chat, noTextMessage, COMPACT_TIMEOUT_MS, type Deps, type Item } from "./chat.ts";
 import type { Input, Output } from "./anthropic.ts";
 import { Store, StoreError } from "./store.ts";
 import { clipEcho, formatDate, utf8Size } from "./record.ts";
@@ -268,7 +268,13 @@ test("a no-text first reply fails, and replay alone does not retry it", async ()
     yield* chat.log([item(1)]);
     yield* chat.awaitSummarized();
     expect(calls).toBe(2);
+    expect(chat.status().lastError).toBeUndefined();
   }));
+});
+
+test("a no-text error says why the model stopped", () => {
+  const out = { ...output(undefined), finish: "tool_use", toolCalls: ["zoom"] };
+  expect(noTextMessage(out)).toBe(`Compaction returned no text: stop tool_use, called zoom, ${out.usage.output} output tokens (${out.usage.reasoning} reasoning)`);
 });
 
 test("awaitSummarized retries with 1s then 2s backoff under TestClock", async () => {

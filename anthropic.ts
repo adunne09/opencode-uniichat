@@ -23,6 +23,10 @@ export type Output = {
   text: string | undefined;
   usage: { input: number; output: number; reasoning: number; cacheRead: number; cacheWrite: number };
   ms: number;
+  // Why the model stopped (e.g. "end_turn", "tool_use", "max_tokens") and any tools it called,
+  // so a reply without text can be explained.
+  finish?: string;
+  toolCalls?: string[];
 };
 
 type Cost = ReadonlyArray<{
@@ -103,6 +107,8 @@ export const generate = Effect.fn("UniiChat.Anthropic.generate")(function* (inpu
       cacheWrite: usage?.cacheWriteInputTokens ?? 0,
     },
     ms: finishedAt - startedAt,
+    finish: response.finishReason.raw ?? response.finishReason.normalized,
+    toolCalls: response.toolCalls.map((call) => call.name),
   };
 }, (effect, input) => Effect.ensuring(
   effect,
