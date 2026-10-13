@@ -1,9 +1,9 @@
 /** @jsxImportSource @opentui/solid */
 import type { Context } from "@opencode/plugin/tui/context";
 import { Plugin } from "@opencode/plugin/tui";
-import type { ScrollBoxRenderable } from "@opentui/core";
-import { useKeyboard, useTerminalDimensions } from "@opentui/solid";
-import { createEffect, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { RGBA, type ScrollBoxRenderable } from "@opentui/core";
+import { useTerminalDimensions } from "@opentui/solid";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { UniiChatRpc } from "./rpc.ts";
 
 const POLL_INTERVAL_MS = 2_000;
@@ -24,24 +24,84 @@ function usageLabel(usage: Status["lastTurn"]): string {
   return `cache read/write ${usage.cacheRead}/${usage.cacheWrite}${cost}`;
 }
 
+const LINE = /^(\d+)\+(\d+)\|/;
+const WORK = /^work: \[([^\]\s]+)\]/;
+
+// One screen of the browser: the live view, the two lines a zoom opened, or a whole message.
+type Level =
+  | { kind: "list"; title: string; lines: string[]; selected: number }
+  | { kind: "text"; title: string; text: string; agent?: string };
+
 function Popup(props: { ctx: Context; sessionID: string }) {
   const ctx = props.ctx;
   const rpc = rpcClient(ctx);
   const controller = new AbortController();
   const options = { location: ctx.location, signal: controller.signal };
   const dimensions = useTerminalDimensions();
-  const height = () => Math.max(4, Math.floor(dimensions().height * 0.5));
-  const [tab, setTab] = createSignal<"view" | "archive">("view");
+  // The dialog is centered and adds one row of top padding. Give the popup a fixed
+  // height that fits the terminal and let the scrollbox take what the header leaves,
+  // so the bottom of the view is never drawn past the screen.
+  const outer = () => Math.max(12, dimensions().height - 6);
+  const page = () => Math.max(1, (scroll?.viewport.height ?? outer()) - 1);
   const [status, setStatus] = createSignal<Status>();
   const [lines, setLines] = createSignal<string[]>([]);
   const [loading, setLoading] = createSignal(true);
   const [statusError, setStatusError] = createSignal<string>();
   const [viewError, setViewError] = createSignal<string>();
-  const [query, setQuery] = createSignal("");
-  const [archive, setArchive] = createSignal("Enter an id+n, id n, or agent Name above.");
-  const [archiveBusy, setArchiveBusy] = createSignal(false);
+  // The live view is the root; Enter pushes a zoom, Escape pops it.
+  const [rootSelected, setRootSelected] = createSignal<number>();
+  const [stack, setStack] = createSignal<Level[]>([]);
+  const [busy, setBusy] = createSignal(false);
+  const [zoomError, setZoomError] = createSignal<string>();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let scroll: ScrollBoxRenderable | undefined;
+
+  const top = () => stack().at(-1);
+  const current = (): Level => top() ?? {
+    kind: "list",
+    title: "View",
+    lines: lines(),
+    selected: Math.min(rootSelected() ?? lines().length - 1, lines().length - 1),
+  };
+  const select = (index: number) => {
+    const level = current();
+    if (level.kind !== "list" || level.lines.length === 0) return;
+    const next = Math.max(0, Math.min(level.lines.length - 1, index));
+    if (stack().length === 0) setRootSelected(next >= lines().length - 1 ? undefined : next);
+    else setStack((levels) => [...levels.slice(0, -1), { ...level, selected: next }]);
+  };
+
+  // Keep the selected line on screen, but only when the selection or level changes, so a
+  // poll does not undo mouse-wheel scrolling.
+  const focus = createMemo(() => {
+    const level = current();
+    return level.kind === "list" ? `${stack().length}:${level.selected}` : undefined;
+  });
+  createEffect(on(focus, (key) => {
+    if (key === undefined) return;
+    const index = Number(key.split(":")[1]);
+    // Rows of a new level or a first load are laid out after this effect runs.
+    setTimeout(() => {
+      const row = scroll?.getChildren()[index];
+      if (row) scroll?.scrollChildIntoView(row.id);
+    }, 0);
+  }));
+
+  // PgUp/PgDn move the selection by about a screen of rows; lines wrap, so count rows, not lines.
+  const pageSelect = (direction: 1 | -1) => {
+    const level = current();
+    if (level.kind !== "list") return;
+    const rows = scroll?.getChildren() ?? [];
+    let budget = page();
+    let index = level.selected;
+    while (budget > 0) {
+      const next = index + direction;
+      if (next < 0 || next >= rows.length) break;
+      budget -= Math.max(1, rows[next]!.height);
+      index = next;
+    }
+    select(index);
+  };
 
   const refresh = async () => {
     const input = { sessionID: props.sessionID };
@@ -68,57 +128,62 @@ function Popup(props: { ctx: Context; sessionID: string }) {
     }
   };
 
-  const zoom = async () => {
-    const value = query().trim();
-    if (!value || archiveBusy()) return;
-    const match = /^(\d+)(?:\s*\+\s*|\s+)(\d+)$/.exec(value);
-    const input = match
-      ? { sessionID: props.sessionID, id: Number(match[1]), n: Number(match[2]) }
-      : /^\d+$/.test(value)
-        ? { sessionID: props.sessionID, id: Number(value), n: 1 }
-        : { sessionID: props.sessionID, name: value };
-    setArchiveBusy(true);
+  const open = async (title: string, input: { id: number; n: number } | { name: string }) => {
+    if (busy()) return;
+    setBusy(true);
+    setZoomError(undefined);
     try {
-      const result = await rpc.archive(input, options);
+      const text = await rpc.archive({ sessionID: props.sessionID, ...input }, options);
       if (controller.signal.aborted) return;
-      setArchive(result || "No archive text.");
+      const level: Level = "n" in input && input.n > 1
+        ? { kind: "list", title, lines: text.split("\n").filter(Boolean), selected: 0 }
+        : { kind: "text", title, text: text || "(empty)", agent: "n" in input ? WORK.exec(text)?.[1] : undefined };
+      setStack((levels) => [...levels, level]);
       scroll?.scrollTo(0);
     } catch (cause) {
-      if (!controller.signal.aborted) setArchive(`Error: ${errorMessage(cause)}`);
+      if (!controller.signal.aborted) setZoomError(errorMessage(cause));
     } finally {
-      if (!controller.signal.aborted) setArchiveBusy(false);
+      if (!controller.signal.aborted) setBusy(false);
     }
   };
 
-  useKeyboard((event) => {
-    if (event.name === "escape") {
-      event.preventDefault();
-      event.stopPropagation();
+  const zoomIn = () => {
+    const level = current();
+    if (level.kind === "text") {
+      if (level.agent) void open(`agent ${level.agent}`, { name: level.agent });
+      return;
+    }
+    const match = LINE.exec(level.lines[level.selected] ?? "");
+    if (match) void open(`${match[1]}+${match[2]}`, { id: Number(match[1]), n: Number(match[2]) });
+  };
+
+  const back = () => {
+    setZoomError(undefined);
+    if (stack().length === 0) {
       ctx.ui.dialog.clear();
       return;
     }
-    if (event.name === "tab") {
-      event.preventDefault();
-      event.stopPropagation();
-      setTab((current) => current === "view" ? "archive" : "view");
-      scroll?.scrollTo(0);
-      return;
-    }
-    const delta = event.name === "up" ? -1
-      : event.name === "down" ? 1
-        : event.name === "pageup" ? -height()
-          : event.name === "pagedown" ? height() : undefined;
-    if (delta !== undefined) {
-      event.preventDefault();
-      event.stopPropagation();
-      scroll?.scrollBy(delta);
-    }
-    if (tab() === "view" && (event.name === "home" || event.name === "end")) {
-      event.preventDefault();
-      event.stopPropagation();
-      scroll?.scrollTo(event.name === "home" ? 0 : scroll.scrollHeight);
-    }
-  });
+    setStack((levels) => levels.slice(0, -1));
+  };
+
+  // Bound in the modal layer, like OpenCode's own dialogs: a raw key handler loses
+  // PgUp/PgDn to the session's global page commands, which also close the dialog.
+  // Priority lets Escape step back out of a zoom before the dialog's own Escape closes it.
+  const isList = () => current().kind === "list";
+  ctx.keymap.layer(() => ({
+    mode: "modal",
+    priority: 10,
+    commands: [
+      { bind: "escape", title: "Back / close", group: "UniiChat", run: back },
+      { bind: "return", title: "Zoom in", group: "UniiChat", run: zoomIn },
+      { bind: "up", title: "Previous line", group: "UniiChat", run: () => isList() ? select((current() as { selected: number }).selected - 1) : scroll?.scrollBy(-1) },
+      { bind: "down", title: "Next line", group: "UniiChat", run: () => isList() ? select((current() as { selected: number }).selected + 1) : scroll?.scrollBy(1) },
+      { bind: "pageup", title: "Previous page", group: "UniiChat", run: () => isList() ? pageSelect(-1) : scroll?.scrollBy(-page()) },
+      { bind: "pagedown", title: "Next page", group: "UniiChat", run: () => isList() ? pageSelect(1) : scroll?.scrollBy(page()) },
+      { bind: "home", title: "Top", group: "UniiChat", run: () => isList() ? select(0) : scroll?.scrollTo(0) },
+      { bind: "end", title: "Bottom", group: "UniiChat", run: () => isList() ? select(Infinity) : scroll?.scrollTo(scroll.scrollHeight) },
+    ],
+  }));
 
   onMount(() => void refresh());
   onCleanup(() => {
@@ -126,17 +191,24 @@ function Popup(props: { ctx: Context; sessionID: string }) {
     if (timer !== undefined) clearTimeout(timer);
   });
 
+  const crumbs = () => ["View", ...stack().map((level) => level.title)].join(" › ");
+  const hint = () => {
+    const level = current();
+    if (level.kind === "list") return "↑/↓ select · Enter or click zoom · Esc " + (stack().length ? "back" : "close");
+    return `↑/↓ scroll${level.agent ? ` · Enter open agent ${level.agent}` : ""} · Esc back`;
+  };
+
   return (
-    <box paddingLeft={2} paddingRight={2} paddingBottom={1} gap={1}>
-      <box flexDirection="row" justifyContent="space-between">
+    <box height={outer() - 1} paddingLeft={2} paddingRight={2} paddingBottom={1} gap={1}>
+      <box flexDirection="row" justifyContent="space-between" flexShrink={0}>
         <text fg={ctx.theme.text.base}><b>UniiChat</b></text>
         <text fg={ctx.theme.text.muted} onMouseUp={() => ctx.ui.dialog.clear()}>esc</text>
       </box>
       <Show when={status()} fallback={
-        <Show when={!statusError()}><text fg={ctx.theme.text.muted}>Loading status…</text></Show>
+        <Show when={!statusError()}><text flexShrink={0} fg={ctx.theme.text.muted}>Loading status…</text></Show>
       }>
         {(current) => (
-          <box>
+          <box flexShrink={0}>
             <text fg={ctx.theme.text.base}>
               {`${current().on ? "ON" : "OFF"} · pending compactions ${current().chat?.pending ?? 0} · active ${current().chat?.inFlight ?? 0} · view ${((current().chat?.viewBytes ?? 0) / 1000).toFixed(1)} KB`}
             </text>
@@ -147,51 +219,54 @@ function Popup(props: { ctx: Context; sessionID: string }) {
               {`Compaction: ${usageLabel(current().chat?.last ?? null)}${current().chat?.last ? ` · ${current().chat!.last!.ms} ms` : ""}`}
             </text>
             <Show when={current().chat?.lastError}>
-              {(message) => <text fg={ctx.theme.text.feedback.error.base}>{`Last error: ${message()}`}</text>}
+              {(message) => <text fg={ctx.theme.text.feedback.error.base} wrapMode="none">{`Last error: ${message().split("\n")[0]}`}</text>}
             </Show>
           </box>
         )}
       </Show>
       <Show when={statusError()}>
-        {(message) => <text fg={ctx.theme.text.feedback.error.base}>{`Status error: ${message()}`}</text>}
+        {(message) => <text flexShrink={0} fg={ctx.theme.text.feedback.error.base}>{`Status error: ${message()}`}</text>}
       </Show>
-      <text fg={ctx.theme.text.base}>
-        {tab() === "view" ? "[View]  Archive" : "View  [Archive]"}
-        <span style={{ fg: ctx.theme.text.muted }}> · Tab switch · ↑/↓ or PgUp/PgDn scroll</span>
+      <text flexShrink={0} fg={ctx.theme.text.base}>
+        {crumbs()}
+        <span style={{ fg: ctx.theme.text.muted }}>{` · ${hint()}`}</span>
       </text>
-      <Show when={tab() === "archive"}>
-        <input
-          value={query()}
-          placeholder="id+n, id n, or Name; Enter to zoom"
-          focused
-          onInput={setQuery}
-          onSubmit={() => void zoom()}
-          textColor={ctx.theme.text.base}
-          backgroundColor={ctx.theme.background.base}
-          focusedTextColor={ctx.theme.text.base}
-          focusedBackgroundColor={ctx.theme.background.base}
-        />
+      <Show when={busy() || zoomError() || (stack().length === 0 && (viewError() || loading() || lines().length === 0))}>
+        <text flexShrink={0} fg={zoomError() || viewError() ? ctx.theme.text.feedback.error.base : ctx.theme.text.muted}>
+          {busy() ? "Loading…"
+            : zoomError() ? `Zoom error: ${zoomError()}`
+            : viewError() ? `View error: ${viewError()}`
+            : loading() ? "Loading view…" : "View empty."}
+        </text>
       </Show>
       <scrollbox
         ref={(element: ScrollBoxRenderable) => (scroll = element)}
-        height={height()}
+        flexGrow={1}
+        flexShrink={1}
+        minHeight={1}
         scrollX={false}
         contentOptions={{ minHeight: 0 }}
         scrollbarOptions={{ visible: false }}
       >
-        <Show when={tab() === "view"} fallback={
-          <text fg={ctx.theme.text.base}>{archiveBusy() ? "Loading archive…" : archive()}</text>
+        <Show when={current().kind === "list" ? current() as Extract<Level, { kind: "list" }> : undefined} fallback={
+          <text fg={ctx.theme.text.base}>{(current() as Extract<Level, { kind: "text" }>).text}</text>
         }>
-          <Show when={viewError()}>
-            {(message) => <text fg={ctx.theme.text.feedback.error.base}>{`View error: ${message()}`}</text>}
-          </Show>
-          <Show when={!loading()} fallback={<text fg={ctx.theme.text.muted}>Loading view…</text>}>
-            <Show when={lines().length > 0} fallback={
-              <Show when={!viewError()}><text fg={ctx.theme.text.muted}>View empty.</text></Show>
-            }>
-              <For each={lines()}>{(line) => <text fg={ctx.theme.text.base}>{line}</text>}</For>
-            </Show>
-          </Show>
+          {(level) => (
+            <For each={level().lines}>
+              {(line, index) => (
+                <box
+                  backgroundColor={index() === level().selected ? ctx.theme.background.action.primary.focused : RGBA.fromInts(0, 0, 0, 0)}
+                  onMouseDown={() => select(index())}
+                  onMouseUp={() => {
+                    select(index());
+                    zoomIn();
+                  }}
+                >
+                  <text fg={index() === level().selected ? ctx.theme.text.action.primary.focused : ctx.theme.text.base}>{line}</text>
+                </box>
+              )}
+            </For>
+          )}
         </Show>
       </scrollbox>
     </box>
@@ -292,7 +367,7 @@ export default Plugin.define({
               }
               if (!argument) {
                 ctx.ui.dialog.show(() => <Popup ctx={ctx} sessionID={route.sessionID} />);
-                ctx.ui.dialog.set({ size: "large" });
+                ctx.ui.dialog.set({ size: "large", centered: true });
                 return;
               }
               try {
