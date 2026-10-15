@@ -280,12 +280,14 @@ function SidebarIndicator(props: { ctx: Context; sessionID: string }) {
   const ctx = props.ctx;
   const [on, setOn] = createSignal<boolean>();
   const [failed, setFailed] = createSignal(false);
+  const [chatError, setChatError] = createSignal(false);
 
   createEffect(() => {
     const sessionID = props.sessionID;
     stateVersion();
     setOn(undefined);
     setFailed(false);
+    setChatError(false);
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const poll = async () => {
@@ -296,6 +298,7 @@ function SidebarIndicator(props: { ctx: Context; sessionID: string }) {
         );
         if (controller.signal.aborted) return;
         setOn(status.on);
+        setChatError(status.chat?.lastError !== undefined);
         setFailed(false);
       } catch {
         if (!controller.signal.aborted) setFailed(true);
@@ -318,6 +321,9 @@ function SidebarIndicator(props: { ctx: Context; sessionID: string }) {
     <text>
       <span style={{ fg: ctx.theme.text.muted }}>UniiChat: </span>
       <span style={{ fg: color() }}>{label()}</span>
+      {chatError() && !failed()
+        ? <span style={{ fg: ctx.theme.text.feedback.error.base }}>{" · compaction error (/unii)"}</span>
+        : null}
     </text>
   );
 }

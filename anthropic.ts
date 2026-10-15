@@ -83,7 +83,7 @@ export const generate = Effect.fn("UniiChat.Anthropic.generate")(function* (inpu
       role: turn.role,
       content: turn.parts.map((part) => ({ type: "text" as const, text: part.text, ...(part.cache ? { cache: { type: "ephemeral" as const } } : {}) })),
     })),
-    providerOptions: { thinking: { type: "adaptive", display: "summarized" }, effort: "xhigh" },
+    providerOptions: { thinking: { type: "adaptive", display: "summarized" }, effort: "high" },
     generation: { maxTokens: 32000 },
   }, {
     http: (request, next) => Effect.gen(function* () {

@@ -71,7 +71,7 @@ describe("Anthropic compaction transport", () => {
       { type: "text", text: input.system, cache_control: { type: "ephemeral" } },
     ]);
     expect(body.thinking).toEqual({ type: "adaptive", display: "summarized", block_binding: { prefix_mismatch_behavior: "drop_block" } });
-    expect(body.output_config).toEqual({ effort: "xhigh" });
+    expect(body.output_config).toEqual({ effort: "high" });
     expect(body.max_tokens).toBe(32000);
     expect(body.stream).toBe(true);
     expect(body).not.toHaveProperty("tool_choice");
