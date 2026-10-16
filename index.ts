@@ -18,7 +18,7 @@ import { BTW_LOOKUP_NOTE, btwMemory, SUBAGENT_NOTE, SYSTEM_PROMPT, systemText, s
 import { UniiChatRpc, statusValue } from "./rpc.ts";
 
 export class IntegrationError extends Data.TaggedError("UniiChatIntegrationError")<{ message: string }> {}
-type Chat = Pick<engine.Chat, "log" | "logAgent" | "agentName" | "system" | "setSystem" | "setTools" | "awaitSummarized" | "renderView" | "zoom" | "date" | "status" | "undoneFrom" | "rewind">;
+type Chat = Pick<engine.Chat, "log" | "logAgent" | "agentName" | "system" | "setSystem" | "setTools" | "awaitSummarized" | "renderView" | "zoom" | "date" | "status" | "latestSource" | "undoneFrom" | "rewind">;
 export interface IntegrationOptions {
   get?: (sessionID: string, deps: engine.Deps) => Effect.Effect<Chat, unknown>;
   sources?: (sessionID: string) => Effect.Effect<Set<string>, unknown>;
@@ -179,11 +179,28 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
   // records too, so memory matches the session and the restored files (amends "never delete").
   const dropUndone = Effect.fn(function* (sessionID: string, chat: Chat, rows: readonly history.Row[]) {
     const present = new Set<string>();
-    for (const row of rows) {
-      present.add(row.id);
-      if (row.type === "assistant") for (const part of row.content) if (part.type === "tool") present.add(part.id);
+    const add = (rows: readonly history.Row[]) => {
+      for (const row of rows) {
+        present.add(row.id);
+        if (row.type === "assistant") for (const part of row.content) if (part.type === "tool") present.add(part.id);
+      }
+    };
+    add(rows);
+    const latest = chat.latestSource();
+    if (latest === undefined || present.has(latest)) return;
+    let k = chat.undoneFrom((base) => present.has(base));
+    if (k === undefined) {
+      // The context starts at a compaction checkpoint and holds no logged message, so the undo
+      // anchor (the latest logged message still in the session) is further back: page for it.
+      const logged = indexes.get(sessionID)?.sources ?? (yield* (options.sources ?? sources)(sessionID));
+      const has = (row: history.Row) => logged.has(row.id) || (row.type === "assistant" && row.content.some((part) => part.type === "tool" && logged.has(part.id)));
+      const full = yield* (options.older ?? older)(sessionID, has).pipe(
+        Effect.catchCause((cause) => Effect.logWarning("UniiChat undo check could not read the session past its checkpoint", cause).pipe(Effect.as(undefined))),
+      );
+      if (!full?.some(has)) return;
+      add(full);
+      k = chat.undoneFrom((base) => present.has(base));
     }
-    const k = chat.undoneFrom((base) => present.has(base));
     if (k === undefined) return;
     const dropped = yield* chat.rewind(k);
     const index = indexes.get(sessionID);

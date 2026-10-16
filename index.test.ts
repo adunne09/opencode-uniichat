@@ -47,6 +47,7 @@ function fixture(initial: Row[], on = true) {
     renderView: () => blocks(lines),
     zoom: () => Effect.succeed({ text: "original", files: [{ mime: "image/png", data: new Uint8Array([1, 2]) }] }),
     date: () => Effect.succeed({ text: "date" }),
+    latestSource: () => logged.at(-1)?.src.split(":")[0],
     undoneFrom: (present: (base: string) => boolean) => {
       for (let i = logged.length - 1; i >= 0; i--) if (present(logged[i]!.src.split(":")[0]!)) return i + 1 < logged.length ? i + 1 : undefined;
       return undefined;
@@ -387,6 +388,25 @@ test("an undone turn is dropped from memory before the next turn, and the redo i
     yield* f.hooks.get("context")!(redo);
     expect(f.logged.map((item) => item.text)).toEqual(["task", "a done", "redo"]);
     expect(redo.messages.map((message) => message.id)).toEqual(["msg_c"]);
+  })));
+});
+
+test("an undo before a compaction checkpoint is found in the full message list", async () => {
+  const reply = (id: string, text: string): Row => ({ type: "assistant", id, content: [{ type: "text", text }], agent: "build", model: { id: "model", providerID: "anthropic" }, time: { created: 1001 } });
+  const checkpoint: Row = { type: "compaction", id: "msg_cp", status: "completed", reason: "auto", summary: "UniiChat is on; native compaction is skipped.", recent: "", time: { created: 1002 } };
+  const f = fixture([user("msg_a")]);
+  await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+    yield* integrate(f.ctx, f.options);
+    yield* f.hooks.get("context")!(f.event([msg("user", "task", "msg_a")]));
+    f.rows([user("msg_a"), reply("msg_ra", "a done"), idle("msg_i1"), user("msg_b"), reply("msg_rb", "b done")]);
+    yield* f.hooks.get("context")!(f.event([msg("user", "task", "msg_b")]));
+    expect(f.logged.map((item) => item.text)).toEqual(["task", "a done", "task", "b done"]);
+    // msg_b was undone; the redo hit a checkpoint, so the context holds no logged message at all.
+    f.options.older = () => Effect.succeed([user("msg_a"), reply("msg_ra", "a done"), idle("msg_i1"), user("msg_c", "redo"), checkpoint, idle("msg_fail")]);
+    f.rows([checkpoint, idle("msg_fail"), user("msg_d", "again")]);
+    yield* f.hooks.get("context")!(f.event([msg("user", "again", "msg_d")]));
+    expect(f.logged.map((item) => item.text)).not.toContain("b done");
+    expect(f.logged.map((item) => item.text)).toContain("again");
   })));
 });
 

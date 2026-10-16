@@ -342,6 +342,11 @@ export class Chat {
   // The first record whose message is gone from the session after an undo (the log tail whose
   // sources are absent, after the last record still present); undefined if nothing was undone or
   // no record is present at all (e.g. the session context starts after a checkpoint).
+  // Source base of the latest record, undefined for an empty log.
+  latestSource(): string | undefined {
+    return this.T > 0 ? this.records.get(this.T - 1)!.src.split(":")[0]! : undefined;
+  }
+
   undoneFrom(present: (base: string) => boolean): number | undefined {
     for (let i = this.T - 1; i >= 0; i--) {
       if (present(this.records.get(i)!.src.split(":")[0]!)) return i + 1 < this.T ? i + 1 : undefined;
