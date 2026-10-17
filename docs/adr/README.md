@@ -1,8 +1,8 @@
 # Architecture decision records
 
-One short record per decision made while building UniiChat. Records marked as deviations depart from
-the recipe. A new decision gets the next number; a changed decision gets a new record, and the old
-record's status points to it.
+One short record per decision made while building UniiChat. Records marked as deviations depart from the recipe.
+
+A new decision gets the next number; a changed decision gets a new record, and the old record's status points to it.
 
 | ADR | Decision | Status |
 | --- | --- | --- |
