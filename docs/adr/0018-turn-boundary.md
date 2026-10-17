@@ -1,10 +1,5 @@
 # ADR-0018: Turn boundary
 
-- Status: Accepted
-- Date: Oct 9, 2026 (approved Oct 9, replaces the first-step rule formerly in §5)
-- Spec: D18
-- Deviation from the recipe: No: maps R§6 turns onto OpenCode.
+Accepted.
 
-## Decision
-
-A turn is everything after the last `idle` marker. Its first step is the first context-hook call that sees the first input after that marker; it waits, renders and freezes the view. Every later hook call until the next `idle` is a continuation, including those that follow a steered message. Steering never resets a turn.
+A turn is everything after the last time the session went idle. Its first request renders and freezes the view; every later request until the next idle continues the turn, including after a message sent while it runs.

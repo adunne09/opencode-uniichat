@@ -1,10 +1,5 @@
-# ADR-0025: Shell messages
+# ADR-0025: Shell messages are not logged
 
-- Status: Accepted
-- Date: Oct 9, 2026 (Q2, closed Oct 9)
-- Spec: D25
-- Deviation from the recipe: Yes, minor: user-run shell commands are not logged.
+Accepted. Deviates from the recipe.
 
-## Decision
-
-User-run shell commands (`shell` messages) are not logged. They stay in the current turn's request as OpenCode renders them.
+Commands the user runs in OpenCode's shell mode are not logged. They stay in the current turn's request as OpenCode renders them.

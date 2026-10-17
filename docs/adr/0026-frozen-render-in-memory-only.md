@@ -1,10 +1,5 @@
-# ADR-0026: Frozen render in memory only
+# ADR-0026: Frozen view in memory only
 
-- Status: Accepted
-- Date: Oct 9, 2026 (Q3, closed Oct 9)
-- Spec: D26
-- Deviation from the recipe: No.
+Accepted.
 
-## Decision
-
-After a server restart mid-turn, the rest of that turn renders the current view (one cache miss). No extra file.
+The view frozen for a turn is kept only in memory. After a server restart mid-turn, the rest of the turn uses the current view, at the cost of one cache miss.

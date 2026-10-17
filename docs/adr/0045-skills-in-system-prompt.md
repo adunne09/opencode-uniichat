@@ -1,19 +1,5 @@
-# ADR-0045: OpenCode's skills list in the system prompt
+# ADR-0045: Skills list in the system prompt
 
-- Status: Accepted
-- Date: Oct 12, 2026
-- Deviation from the recipe: Yes, part of the system-prompt deviation (ADR-0002).
+Accepted. Deviates from the recipe.
 
-## Context
-
-ADR-0002 kept OpenCode's skills list out of `system.txt`, so Unii could not see or use the skills
-installed in OpenCode.
-
-## Decision
-
-OpenCode's skills section goes into `system.txt` between the Code Mode catalog and AGENTS.md, frozen
-at `/unii on` like the catalog. User-invoked `skill` messages are logged as `user` messages.
-
-## Consequences
-
-Sessions switched on earlier keep their old `system.txt` until `/unii on` is run again.
+Without it Unii could not see installed skills. OpenCode's skills list goes into `system.txt` after the Code Mode catalog, frozen at `/unii on`, and skill messages the user invokes are logged as user messages.

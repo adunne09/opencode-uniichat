@@ -1,10 +1,5 @@
-# ADR-0027: system.txt timing
+# ADR-0027: When system.txt is rendered
 
-- Status: Accepted
-- Date: Oct 9, 2026 (approved Oct 9, refines D2/D13)
-- Spec: D27
-- Deviation from the recipe: No.
+Accepted.
 
-## Decision
-
-`/unii on` stores `{on: true, render: true}` in `ctx.storage`. The next first step (D18) renders `system.txt` from that hook call's system text (the CodeMode catalog is only readable there), saves it, and clears `render`. **Subagent views** (approved Oct 9, refines D15): each child turn renders and freezes the parent's current view at its own first step, by the D18 rule applied to the child session.
+`/unii on` marks the chat for rendering; the next turn's first request builds `system.txt` from that request's system text, since the Code Mode catalog is only readable there. A subagent renders and freezes the parent's current view at its own first request.

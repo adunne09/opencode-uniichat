@@ -1,10 +1,5 @@
 # ADR-0011: No capture exclusions
 
-- Status: Accepted
-- Date: Oct 9, 2026
-- Spec: D11
-- Deviation from the recipe: No.
+Accepted.
 
-## Decision
-
-Memory stays local. Export and deletion are out of scope (not in the recipe).
+Everything in an enabled session is logged and stays on the local disk. Export and deletion are out of scope, as in the recipe.

@@ -1,10 +1,5 @@
-# ADR-0013: CodeMode catalog
+# ADR-0013: Code Mode catalog in the system prompt
 
-- Status: Accepted
-- Date: Oct 9, 2026 (approved Oct 9)
-- Spec: D13
-- Deviation from the recipe: Yes, part of the system-prompt deviation (D2).
+Accepted. Deviates from the recipe.
 
-## Decision
-
-MCP and namespace tools reachable only through `execute` are listed in OpenCode's system instructions, not in the `execute` tool, whose description is static (`core/src/codemode/tool.ts:62-69`). The rendered catalog goes into `system.txt` after the R§5 prompt and before AGENTS.md, because it changes less often than AGENTS.md. It is frozen at `/unii on`; an MCP inventory change takes effect at the next `/unii on`. MCP server guidance (`<mcp_instructions>`), skills and references stay out (D2).
+Tools reachable only through Code Mode's `execute` are listed in OpenCode's system prompt, not in a tool. That catalog is copied into `system.txt` after the recipe's prompt and frozen at `/unii on`, so a change of installed MCP tools takes effect at the next `/unii on`.

@@ -1,10 +1,5 @@
-# ADR-0030: Echo clip marker
+# ADR-0030: Clip marker for tool output
 
-- Status: Accepted
-- Date: Oct 9, 2026 (approved Oct 9)
-- Spec: D30
-- Deviation from the recipe: No: R§1 head and tail, 30,000 characters.
+Accepted.
 
-## Decision
-
-A clipped tool output is a 15,000-character head, `\n[… N characters clipped …]\n`, and a 15,000-character tail. The marker is not counted in the 30,000.
+Clipped tool output keeps a 15,000-character head and a 15,000-character tail around a `[... N characters clipped ...]` marker, which does not count toward the 30,000.

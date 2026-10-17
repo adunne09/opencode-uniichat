@@ -1,10 +1,5 @@
-# ADR-0044: Sidebar indicator; /unii on outside a session
+# ADR-0044: Sidebar indicator; /unii on without a session
 
-- Status: Accepted
-- Date: Oct 11, 2026
-- Deviation from the recipe: Not covered by the recipe (UI).
+Accepted.
 
-## Decision
-
-The session sidebar shows whether UniiChat is on (option `tui.sidebar` hides it). `/unii on` with no
-session open starts a new session with UniiChat already on.
+The session sidebar shows whether UniiChat is on (`tui.sidebar` hides it). `/unii on` with no session open starts a new session that is already on.

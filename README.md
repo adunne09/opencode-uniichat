@@ -123,7 +123,8 @@ Each one is an [architecture decision record](docs/adr/README.md), which gives t
 6. **Extra cache marks** ([0005](docs/adr/0005-cache-marks.md)). OpenCode may add up to two cache
    marks of its own on the tools/system prefix.
 7. **No lock on the log** ([0041](docs/adr/0041-drop-chat-lock.md)). The recipe says "hold a lock".
-   Here one OpenCode server owns a chat, but nothing enforces it.
+   A session is never open in two OpenCode servers at once, so the lock was redundant, and a stale
+   lock left by a server restart blocked the session.
 8. **Subagents keep their own system prompt** ([0015](docs/adr/0015-subagent-system-prompt.md)). The
    recipe makes a subagent a fresh call that starts with the view. Here a subagent also keeps its
    OpenCode agent's prompt, plus a note about the view. With Unii's prompt, subagents took their
