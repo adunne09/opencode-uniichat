@@ -2,12 +2,12 @@
 // @bun
 // src/tui.tsx
 import { use as _$use } from "opentui:runtime-module:%40opentui%2Fsolid";
-import { effect as _$effect } from "opentui:runtime-module:%40opentui%2Fsolid";
-import { memo as _$memo } from "opentui:runtime-module:%40opentui%2Fsolid";
-import { insert as _$insert } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { createComponent as _$createComponent } from "opentui:runtime-module:%40opentui%2Fsolid";
+import { memo as _$memo } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { createTextNode as _$createTextNode } from "opentui:runtime-module:%40opentui%2Fsolid";
+import { effect as _$effect } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { insertNode as _$insertNode } from "opentui:runtime-module:%40opentui%2Fsolid";
+import { insert as _$insert } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { setProp as _$setProp } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { createElement as _$createElement } from "opentui:runtime-module:%40opentui%2Fsolid";
 import { Plugin } from "opentui:runtime-module:%40opencode%2Fplugin%2Ftui";
@@ -83,13 +83,22 @@ function errorMessage(error) {
   }
   return String(error);
 }
+var tokens = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
+var duration = (ms) => ms >= 60000 ? `${(ms / 60000).toFixed(1)} min` : ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.round(ms)} ms`;
+var kilobytes = (bytes) => `${(bytes / 1000).toFixed(1)} KB`;
 function usageLabel(usage2) {
   if (!usage2)
-    return "not available";
-  const cost = Number.isFinite(usage2.cost) ? ` \xB7 $${usage2.cost.toFixed(4)}` : "";
-  return `cache read/write ${usage2.cacheRead}/${usage2.cacheWrite}${cost}`;
+    return "none yet";
+  const parts = [`${tokens(usage2.input)} in`, `${tokens(usage2.output)} out`, `cache ${tokens(usage2.cacheRead)} read / ${tokens(usage2.cacheWrite)} write`];
+  if (Number.isFinite(usage2.cost) && usage2.cost > 0)
+    parts.push(`$${usage2.cost.toFixed(2)}`);
+  if (usage2.ms !== undefined)
+    parts.push(duration(usage2.ms));
+  return parts.join("  \xB7  ");
 }
 var LINE = /^(\d+)\+(\d+)\|/;
+var KIND = /^(user|unii|tool|echo|work|note)(\d*):/;
+var ROW_GAP = 1;
 var WORK = /^work: \[([^\]\s]+)\]/;
 function Popup(props) {
   const ctx = props.ctx;
@@ -158,7 +167,7 @@ function Popup(props) {
       const next = index + direction;
       if (next < 0 || next >= rows.length)
         break;
-      budget -= Math.max(1, rows[next].height);
+      budget -= Math.max(1, rows[next].height) + ROW_GAP;
       index = next;
     }
     select(index);
@@ -301,137 +310,294 @@ function Popup(props) {
     if (timer !== undefined)
       clearTimeout(timer);
   });
-  const crumbs = () => ["View", ...stack().map((level) => level.title)].join(" \u203A ");
-  const hint = () => {
+  const theme = ctx.theme;
+  const titles = () => ["View", ...stack().map((level) => level.title)];
+  const position = () => {
     const level = current();
+    return level.kind === "list" && level.lines.length > 0 ? `${level.selected + 1} / ${level.lines.length}` : "";
+  };
+  const keys = () => {
+    const level = current();
+    const esc = ["esc", stack().length ? "back" : "close"];
     if (level.kind === "list")
-      return "\u2191/\u2193 select \xB7 Enter or click zoom \xB7 Esc " + (stack().length ? "back" : "close");
-    return `\u2191/\u2193 scroll${level.agent ? ` \xB7 Enter open agent ${level.agent}` : ""} \xB7 Esc back`;
+      return [["\u2191\u2193", "select"], ["pgup/pgdn", "page"], ["enter", "zoom in"], esc];
+    return [["\u2191\u2193", "scroll"], ...level.agent ? [["enter", `open agent ${level.agent}`]] : [], esc];
+  };
+  const notice = () => busy() ? "Loading\u2026" : zoomError() ? `Zoom error: ${zoomError()}` : stack().length === 0 && viewError() ? `View error: ${viewError()}` : stack().length === 0 && loading() ? "Loading view\u2026" : stack().length === 0 && lines().length === 0 ? "The view is empty. It fills up as the chat goes on." : undefined;
+  const Stat = (row) => (() => {
+    var _el$ = _$createElement("box"), _el$2 = _$createElement("text"), _el$3 = _$createElement("text");
+    _$insertNode(_el$, _el$2);
+    _$insertNode(_el$, _el$3);
+    _$setProp(_el$, "flexDirection", "row");
+    _$setProp(_el$, "flexShrink", 0);
+    _$setProp(_el$2, "width", 13);
+    _$setProp(_el$2, "flexShrink", 0);
+    _$insert(_el$2, () => row.label);
+    _$setProp(_el$3, "flexGrow", 1);
+    _$setProp(_el$3, "wrapMode", "none");
+    _$insert(_el$3, () => row.children);
+    _$effect((_p$) => {
+      var _v$ = theme.text.muted, _v$2 = theme.text.base;
+      _v$ !== _p$.e && (_p$.e = _$setProp(_el$2, "fg", _v$, _p$.e));
+      _v$2 !== _p$.t && (_p$.t = _$setProp(_el$3, "fg", _v$2, _p$.t));
+      return _p$;
+    }, {
+      e: undefined,
+      t: undefined
+    });
+    return _el$;
+  })();
+  const dot = () => (() => {
+    var _el$4 = _$createElement("span");
+    _$insertNode(_el$4, _$createTextNode(`  \xB7  `));
+    _$effect((_$p) => _$setProp(_el$4, "style", {
+      fg: theme.text.muted
+    }, _$p));
+    return _el$4;
+  })();
+  const gutter = (lines2) => Math.max(4, ...lines2.map((line) => LINE.exec(line)?.[0].length ?? 0)) + 1;
+  const Line = (row) => {
+    const head = LINE.exec(row.line);
+    const body = head ? row.line.slice(head[0].length) : row.line;
+    const kind = KIND.exec(body);
+    const fg = () => row.selected ? theme.text.action.primary.focused : theme.text.base;
+    const kindColor = () => row.selected ? theme.text.action.primary.focused : kind?.[1] === "user" ? theme.text.action.primary.base : kind?.[1] === "unii" ? theme.text.feedback.success.base : kind?.[1] === "work" ? theme.text.feedback.warning.base : theme.text.muted;
+    return (() => {
+      var _el$6 = _$createElement("box"), _el$7 = _$createElement("text"), _el$8 = _$createElement("text");
+      _$insertNode(_el$6, _el$7);
+      _$insertNode(_el$6, _el$8);
+      _$setProp(_el$6, "flexDirection", "row");
+      _$setProp(_el$6, "paddingLeft", 1);
+      _$setProp(_el$6, "paddingRight", 1);
+      _$setProp(_el$7, "flexShrink", 0);
+      _$insert(_el$7, () => head ? `${head[1]}+${head[2]}` : "");
+      _$setProp(_el$8, "flexGrow", 1);
+      _$setProp(_el$8, "flexShrink", 1);
+      _$insert(_el$8, kind ? (() => {
+        var _el$9 = _$createElement("span"), _el$0 = _$createElement("b");
+        _$insertNode(_el$9, _el$0);
+        _$insert(_el$0, () => kind[0]);
+        _$effect((_$p) => _$setProp(_el$9, "style", {
+          fg: kindColor()
+        }, _$p));
+        return _el$9;
+      })() : null, null);
+      _$insert(_el$8, () => kind ? body.slice(kind[0].length) : body, null);
+      _$effect((_p$) => {
+        var _v$3 = row.width, _v$4 = row.selected ? theme.text.action.primary.focused : theme.text.muted, _v$5 = fg();
+        _v$3 !== _p$.e && (_p$.e = _$setProp(_el$7, "width", _v$3, _p$.e));
+        _v$4 !== _p$.t && (_p$.t = _$setProp(_el$7, "fg", _v$4, _p$.t));
+        _v$5 !== _p$.a && (_p$.a = _$setProp(_el$8, "fg", _v$5, _p$.a));
+        return _p$;
+      }, {
+        e: undefined,
+        t: undefined,
+        a: undefined
+      });
+      return _el$6;
+    })();
   };
   return (() => {
-    var _el$ = _$createElement("box"), _el$2 = _$createElement("box"), _el$3 = _$createElement("text"), _el$4 = _$createElement("b"), _el$6 = _$createElement("text"), _el$8 = _$createElement("text"), _el$9 = _$createElement("span"), _el$1 = _$createElement("scrollbox");
-    _$insertNode(_el$, _el$2);
-    _$insertNode(_el$, _el$8);
-    _$insertNode(_el$, _el$1);
-    _$setProp(_el$, "paddingLeft", 2);
-    _$setProp(_el$, "paddingRight", 2);
-    _$setProp(_el$, "paddingBottom", 1);
-    _$setProp(_el$, "gap", 1);
-    _$insertNode(_el$2, _el$3);
-    _$insertNode(_el$2, _el$6);
-    _$setProp(_el$2, "flexDirection", "row");
-    _$setProp(_el$2, "justifyContent", "space-between");
-    _$setProp(_el$2, "flexShrink", 0);
-    _$insertNode(_el$3, _el$4);
-    _$insertNode(_el$4, _$createTextNode(`UniiChat`));
-    _$insertNode(_el$6, _$createTextNode(`esc`));
-    _$setProp(_el$6, "onMouseUp", () => ctx.ui.dialog.clear());
-    _$insert(_el$, _$createComponent(Show, {
+    var _el$1 = _$createElement("box"), _el$10 = _$createElement("box"), _el$11 = _$createElement("text"), _el$12 = _$createElement("span"), _el$13 = _$createElement("b"), _el$15 = _$createElement("text"), _el$17 = _$createElement("box"), _el$18 = _$createElement("text"), _el$19 = _$createElement("text"), _el$20 = _$createElement("scrollbox"), _el$21 = _$createElement("box");
+    _$insertNode(_el$1, _el$10);
+    _$insertNode(_el$1, _el$17);
+    _$insertNode(_el$1, _el$20);
+    _$insertNode(_el$1, _el$21);
+    _$setProp(_el$1, "paddingLeft", 2);
+    _$setProp(_el$1, "paddingRight", 2);
+    _$setProp(_el$1, "paddingBottom", 1);
+    _$insertNode(_el$10, _el$11);
+    _$insertNode(_el$10, _el$15);
+    _$setProp(_el$10, "flexDirection", "row");
+    _$setProp(_el$10, "justifyContent", "space-between");
+    _$setProp(_el$10, "flexShrink", 0);
+    _$setProp(_el$10, "paddingBottom", 1);
+    _$insertNode(_el$11, _el$12);
+    _$insertNode(_el$12, _el$13);
+    _$insertNode(_el$13, _$createTextNode(`UniiChat`));
+    _$insert(_el$11, _$createComponent(Show, {
+      get when() {
+        return status2();
+      },
+      children: (current2) => current2().on ? (() => {
+        var _el$22 = _$createElement("span");
+        _$insertNode(_el$22, _$createTextNode(`   \u25CF on`));
+        _$effect((_$p) => _$setProp(_el$22, "style", {
+          fg: theme.text.feedback.success.base
+        }, _$p));
+        return _el$22;
+      })() : (() => {
+        var _el$24 = _$createElement("span");
+        _$insertNode(_el$24, _$createTextNode(`   \u25CB off`));
+        _$effect((_$p) => _$setProp(_el$24, "style", {
+          fg: theme.text.muted
+        }, _$p));
+        return _el$24;
+      })()
+    }), null);
+    _$insertNode(_el$15, _$createTextNode(`esc`));
+    _$setProp(_el$15, "onMouseUp", () => ctx.ui.dialog.clear());
+    _$insert(_el$1, _$createComponent(Show, {
       get when() {
         return status2();
       },
       get fallback() {
-        return _$createComponent(Show, {
-          get when() {
-            return !statusError();
-          },
-          get children() {
-            var _el$10 = _$createElement("text");
-            _$insertNode(_el$10, _$createTextNode(`Loading status\u2026`));
-            _$setProp(_el$10, "flexShrink", 0);
-            _$effect((_$p) => _$setProp(_el$10, "fg", ctx.theme.text.muted, _$p));
-            return _el$10;
-          }
-        });
+        return (() => {
+          var _el$26 = _$createElement("text");
+          _$setProp(_el$26, "flexShrink", 0);
+          _$insert(_el$26, (() => {
+            var _c$ = _$memo(() => !!statusError());
+            return () => _c$() ? `Status error: ${statusError()}` : "Loading status\u2026";
+          })());
+          _$effect((_$p) => _$setProp(_el$26, "fg", statusError() ? theme.text.feedback.error.base : theme.text.muted, _$p));
+          return _el$26;
+        })();
       },
-      children: (current2) => (() => {
-        var _el$12 = _$createElement("box"), _el$13 = _$createElement("text"), _el$14 = _$createElement("text"), _el$15 = _$createElement("text");
-        _$insertNode(_el$12, _el$13);
-        _$insertNode(_el$12, _el$14);
-        _$insertNode(_el$12, _el$15);
-        _$setProp(_el$12, "flexShrink", 0);
-        _$insert(_el$13, () => `${current2().on ? "ON" : "OFF"} \xB7 pending compactions ${current2().chat?.pending ?? 0} \xB7 active ${current2().chat?.inFlight ?? 0} \xB7 view ${((current2().chat?.viewBytes ?? 0) / 1000).toFixed(1)} KB`);
-        _$insert(_el$14, () => `Turn: ${usageLabel(current2().lastTurn)}${current2().lastTurn?.ms !== undefined ? ` \xB7 ${current2().lastTurn?.ms} ms` : ""}`);
-        _$insert(_el$15, () => `Compaction: ${current2().chat?.last ? `last ${current2().chat.last.ms} ms` : "no call yet"} \xB7 ${current2().chat?.total.calls ?? 0} calls`);
-        _$insert(_el$12, _$createComponent(Show, {
-          get when() {
-            return current2().chat?.lastError;
-          },
-          children: (message) => (() => {
-            var _el$16 = _$createElement("text");
-            _$setProp(_el$16, "wrapMode", "none");
-            _$insert(_el$16, () => `Last error: ${message().split(`
-`)[0]}`);
-            _$effect((_$p) => _$setProp(_el$16, "fg", ctx.theme.text.feedback.error.base, _$p));
-            return _el$16;
-          })()
-        }), null);
-        _$effect((_p$) => {
-          var _v$6 = ctx.theme.text.base, _v$7 = ctx.theme.text.muted, _v$8 = ctx.theme.text.muted;
-          _v$6 !== _p$.e && (_p$.e = _$setProp(_el$13, "fg", _v$6, _p$.e));
-          _v$7 !== _p$.t && (_p$.t = _$setProp(_el$14, "fg", _v$7, _p$.t));
-          _v$8 !== _p$.a && (_p$.a = _$setProp(_el$15, "fg", _v$8, _p$.a));
-          return _p$;
-        }, {
-          e: undefined,
-          t: undefined,
-          a: undefined
-        });
-        return _el$12;
-      })()
-    }), _el$8);
-    _$insert(_el$, _$createComponent(Show, {
+      children: (current2) => {
+        const chat = () => current2().chat;
+        const active = () => (chat()?.pending ?? 0) + (chat()?.inFlight ?? 0) > 0;
+        return (() => {
+          var _el$27 = _$createElement("box");
+          _$setProp(_el$27, "flexShrink", 0);
+          _$insert(_el$27, _$createComponent(Stat, {
+            label: "Memory",
+            get children() {
+              return [_$memo(() => _$memo(() => !!chat())() ? `${kilobytes(chat().viewBytes)} view` : "not started"), _$memo(() => _$memo(() => !!chat())() ? dot() : null), _$memo(() => _$memo(() => !!chat())() ? `${chat().lines} lines` : null)];
+            }
+          }), null);
+          _$insert(_el$27, _$createComponent(Stat, {
+            label: "Compaction",
+            get children() {
+              return [(() => {
+                var _el$28 = _$createElement("span");
+                _$insert(_el$28, (() => {
+                  var _c$2 = _$memo(() => !!active());
+                  return () => _c$2() ? `${chat().inFlight} running, ${chat().pending} queued` : "idle";
+                })());
+                _$effect((_$p) => _$setProp(_el$28, "style", {
+                  fg: active() ? theme.text.feedback.warning.base : theme.text.muted
+                }, _$p));
+                return _el$28;
+              })(), _$memo(() => dot()), _$memo(() => _$memo(() => !!chat()?.last)() ? `last took ${duration(chat().last.ms)}` : "no call yet"), _$memo(() => dot()), _$memo(() => `${chat()?.total.calls ?? 0} calls`)];
+            }
+          }), null);
+          _$insert(_el$27, _$createComponent(Stat, {
+            label: "Last turn",
+            get children() {
+              return usageLabel(current2().lastTurn);
+            }
+          }), null);
+          _$insert(_el$27, _$createComponent(Show, {
+            get when() {
+              return chat()?.lastError;
+            },
+            children: (message) => _$createComponent(Stat, {
+              label: "Error",
+              get children() {
+                var _el$29 = _$createElement("span");
+                _$insert(_el$29, () => message().split(`
+`)[0]);
+                _$effect((_$p) => _$setProp(_el$29, "style", {
+                  fg: theme.text.feedback.error.base
+                }, _$p));
+                return _el$29;
+              }
+            })
+          }), null);
+          _$insert(_el$27, _$createComponent(Show, {
+            get when() {
+              return statusError();
+            },
+            children: (message) => _$createComponent(Stat, {
+              label: "Status",
+              get children() {
+                var _el$30 = _$createElement("span");
+                _$insert(_el$30, message);
+                _$effect((_$p) => _$setProp(_el$30, "style", {
+                  fg: theme.text.feedback.error.base
+                }, _$p));
+                return _el$30;
+              }
+            })
+          }), null);
+          return _el$27;
+        })();
+      }
+    }), _el$17);
+    _$insertNode(_el$17, _el$18);
+    _$insertNode(_el$17, _el$19);
+    _$setProp(_el$17, "flexDirection", "row");
+    _$setProp(_el$17, "justifyContent", "space-between");
+    _$setProp(_el$17, "flexShrink", 0);
+    _$setProp(_el$17, "marginTop", 1);
+    _$setProp(_el$17, "border", ["bottom"]);
+    _$insert(_el$18, _$createComponent(For, {
+      get each() {
+        return titles();
+      },
+      children: (title, index) => [_$memo(() => _$memo(() => index() > 0)() ? (() => {
+        var _el$31 = _$createElement("span");
+        _$insertNode(_el$31, _$createTextNode(`  \u203A  `));
+        _$effect((_$p) => _$setProp(_el$31, "style", {
+          fg: theme.text.muted
+        }, _$p));
+        return _el$31;
+      })() : null), _$memo(() => _$memo(() => index() === titles().length - 1)() ? (() => {
+        var _el$33 = _$createElement("span"), _el$34 = _$createElement("b");
+        _$insertNode(_el$33, _el$34);
+        _$insert(_el$34, title);
+        _$effect((_$p) => _$setProp(_el$33, "style", {
+          fg: theme.text.base
+        }, _$p));
+        return _el$33;
+      })() : (() => {
+        var _el$35 = _$createElement("span");
+        _$insert(_el$35, title);
+        _$effect((_$p) => _$setProp(_el$35, "style", {
+          fg: theme.text.muted
+        }, _$p));
+        return _el$35;
+      })())]
+    }));
+    _$insert(_el$19, position);
+    _$insert(_el$1, _$createComponent(Show, {
       get when() {
-        return statusError();
+        return notice();
       },
       children: (message) => (() => {
-        var _el$17 = _$createElement("text");
-        _$setProp(_el$17, "flexShrink", 0);
-        _$insert(_el$17, () => `Status error: ${message()}`);
-        _$effect((_$p) => _$setProp(_el$17, "fg", ctx.theme.text.feedback.error.base, _$p));
-        return _el$17;
+        var _el$36 = _$createElement("text");
+        _$setProp(_el$36, "flexShrink", 0);
+        _$setProp(_el$36, "paddingTop", 1);
+        _$insert(_el$36, message);
+        _$effect((_$p) => _$setProp(_el$36, "fg", zoomError() || viewError() ? theme.text.feedback.error.base : theme.text.muted, _$p));
+        return _el$36;
       })()
-    }), _el$8);
-    _$insertNode(_el$8, _el$9);
-    _$setProp(_el$8, "flexShrink", 0);
-    _$insert(_el$8, crumbs, _el$9);
-    _$insert(_el$9, () => ` \xB7 ${hint()}`);
-    _$insert(_el$, _$createComponent(Show, {
-      get when() {
-        return busy() || zoomError() || stack().length === 0 && (viewError() || loading() || lines().length === 0);
-      },
-      get children() {
-        var _el$0 = _$createElement("text");
-        _$setProp(_el$0, "flexShrink", 0);
-        _$insert(_el$0, (() => {
-          var _c$ = _$memo(() => !!busy());
-          return () => _c$() ? "Loading\u2026" : _$memo(() => !!zoomError())() ? `Zoom error: ${zoomError()}` : _$memo(() => !!viewError())() ? `View error: ${viewError()}` : loading() ? "Loading view\u2026" : "View empty.";
-        })());
-        _$effect((_$p) => _$setProp(_el$0, "fg", zoomError() || viewError() ? ctx.theme.text.feedback.error.base : ctx.theme.text.muted, _$p));
-        return _el$0;
-      }
-    }), _el$1);
-    _$use((element) => scroll = element, _el$1);
-    _$setProp(_el$1, "flexGrow", 1);
-    _$setProp(_el$1, "flexShrink", 1);
-    _$setProp(_el$1, "minHeight", 1);
-    _$setProp(_el$1, "scrollX", false);
-    _$setProp(_el$1, "contentOptions", {
-      minHeight: 0
+    }), _el$20);
+    _$use((element) => scroll = element, _el$20);
+    _$setProp(_el$20, "flexGrow", 1);
+    _$setProp(_el$20, "flexShrink", 1);
+    _$setProp(_el$20, "minHeight", 1);
+    _$setProp(_el$20, "marginTop", 1);
+    _$setProp(_el$20, "scrollX", false);
+    _$setProp(_el$20, "contentOptions", {
+      minHeight: 0,
+      gap: 1
     });
-    _$setProp(_el$1, "scrollbarOptions", {
+    _$setProp(_el$20, "scrollbarOptions", {
       visible: false
     });
-    _$insert(_el$1, _$createComponent(Show, {
+    _$insert(_el$20, _$createComponent(Show, {
       get when() {
         return _$memo(() => current().kind === "list")() ? current() : undefined;
       },
       get fallback() {
         return (() => {
-          var _el$18 = _$createElement("text");
-          _$insert(_el$18, () => current().text);
-          _$effect((_$p) => _$setProp(_el$18, "fg", ctx.theme.text.base, _$p));
-          return _el$18;
+          var _el$37 = _$createElement("text");
+          _$setProp(_el$37, "paddingLeft", 1);
+          _$setProp(_el$37, "paddingRight", 1);
+          _$insert(_el$37, () => current().text);
+          _$effect((_$p) => _$setProp(_el$37, "fg", theme.text.base, _$p));
+          return _el$37;
         })();
       },
       children: (level) => _$createComponent(For, {
@@ -439,45 +605,78 @@ function Popup(props) {
           return level().lines;
         },
         children: (line, index) => (() => {
-          var _el$19 = _$createElement("box"), _el$20 = _$createElement("text");
-          _$insertNode(_el$19, _el$20);
-          _$setProp(_el$19, "onMouseDown", () => select(index()));
-          _$setProp(_el$19, "onMouseUp", () => {
+          var _el$38 = _$createElement("box");
+          _$setProp(_el$38, "onMouseDown", () => select(index()));
+          _$setProp(_el$38, "onMouseUp", () => {
             select(index());
             zoomIn();
           });
-          _$insert(_el$20, line);
-          _$effect((_p$) => {
-            var _v$9 = index() === level().selected ? ctx.theme.background.action.primary.focused : RGBA.fromInts(0, 0, 0, 0), _v$0 = index() === level().selected ? ctx.theme.text.action.primary.focused : ctx.theme.text.base;
-            _v$9 !== _p$.e && (_p$.e = _$setProp(_el$19, "backgroundColor", _v$9, _p$.e));
-            _v$0 !== _p$.t && (_p$.t = _$setProp(_el$20, "fg", _v$0, _p$.t));
-            return _p$;
-          }, {
-            e: undefined,
-            t: undefined
-          });
-          return _el$19;
+          _$insert(_el$38, _$createComponent(Line, {
+            line,
+            get selected() {
+              return index() === level().selected;
+            },
+            get width() {
+              return gutter(level().lines);
+            }
+          }));
+          _$effect((_$p) => _$setProp(_el$38, "backgroundColor", index() === level().selected ? theme.background.action.primary.focused : RGBA.fromInts(0, 0, 0, 0), _$p));
+          return _el$38;
         })()
       })
     }));
+    _$setProp(_el$21, "flexDirection", "row");
+    _$setProp(_el$21, "flexShrink", 0);
+    _$setProp(_el$21, "gap", 3);
+    _$setProp(_el$21, "paddingTop", 1);
+    _$setProp(_el$21, "border", ["top"]);
+    _$insert(_el$21, _$createComponent(For, {
+      get each() {
+        return keys();
+      },
+      children: ([key, label]) => (() => {
+        var _el$39 = _$createElement("text"), _el$40 = _$createElement("span"), _el$41 = _$createElement("b"), _el$42 = _$createElement("span");
+        _$insertNode(_el$39, _el$40);
+        _$insertNode(_el$39, _el$42);
+        _$insertNode(_el$40, _el$41);
+        _$insert(_el$41, key);
+        _$insert(_el$42, ` ${label}`);
+        _$effect((_p$) => {
+          var _v$10 = {
+            fg: theme.text.base
+          }, _v$11 = {
+            fg: theme.text.muted
+          };
+          _v$10 !== _p$.e && (_p$.e = _$setProp(_el$40, "style", _v$10, _p$.e));
+          _v$11 !== _p$.t && (_p$.t = _$setProp(_el$42, "style", _v$11, _p$.t));
+          return _p$;
+        }, {
+          e: undefined,
+          t: undefined
+        });
+        return _el$39;
+      })()
+    }));
     _$effect((_p$) => {
-      var _v$ = outer() - 1, _v$2 = ctx.theme.text.base, _v$3 = ctx.theme.text.muted, _v$4 = ctx.theme.text.base, _v$5 = {
-        fg: ctx.theme.text.muted
-      };
-      _v$ !== _p$.e && (_p$.e = _$setProp(_el$, "height", _v$, _p$.e));
-      _v$2 !== _p$.t && (_p$.t = _$setProp(_el$3, "fg", _v$2, _p$.t));
-      _v$3 !== _p$.a && (_p$.a = _$setProp(_el$6, "fg", _v$3, _p$.a));
-      _v$4 !== _p$.o && (_p$.o = _$setProp(_el$8, "fg", _v$4, _p$.o));
-      _v$5 !== _p$.i && (_p$.i = _$setProp(_el$9, "style", _v$5, _p$.i));
+      var _v$6 = outer() - 1, _v$7 = {
+        fg: theme.text.base
+      }, _v$8 = theme.text.muted, _v$9 = theme.border.base, _v$0 = theme.text.muted, _v$1 = theme.border.base;
+      _v$6 !== _p$.e && (_p$.e = _$setProp(_el$1, "height", _v$6, _p$.e));
+      _v$7 !== _p$.t && (_p$.t = _$setProp(_el$12, "style", _v$7, _p$.t));
+      _v$8 !== _p$.a && (_p$.a = _$setProp(_el$15, "fg", _v$8, _p$.a));
+      _v$9 !== _p$.o && (_p$.o = _$setProp(_el$17, "borderColor", _v$9, _p$.o));
+      _v$0 !== _p$.i && (_p$.i = _$setProp(_el$19, "fg", _v$0, _p$.i));
+      _v$1 !== _p$.n && (_p$.n = _$setProp(_el$21, "borderColor", _v$1, _p$.n));
       return _p$;
     }, {
       e: undefined,
       t: undefined,
       a: undefined,
       o: undefined,
-      i: undefined
+      i: undefined,
+      n: undefined
     });
-    return _el$;
+    return _el$1;
   })();
 }
 var [stateVersion, bumpState] = createSignal(0);
@@ -524,36 +723,36 @@ function SidebarIndicator(props) {
   const label = () => failed() ? "error" : on2() === undefined ? "\u2026" : on2() ? "enabled" : "disabled";
   const color = () => failed() ? ctx.theme.text.feedback.error.base : on2() ? ctx.theme.text.feedback.success.base : ctx.theme.text.muted;
   return (() => {
-    var _el$21 = _$createElement("text"), _el$22 = _$createElement("span"), _el$24 = _$createElement("span");
-    _$insertNode(_el$21, _el$22);
-    _$insertNode(_el$21, _el$24);
-    _$insertNode(_el$22, _$createTextNode(`UniiChat: `));
-    _$insert(_el$24, label);
-    _$insert(_el$21, (() => {
-      var _c$2 = _$memo(() => !!(chatError() && !failed()));
-      return () => _c$2() ? (() => {
-        var _el$25 = _$createElement("span");
-        _$insertNode(_el$25, _$createTextNode(` \xB7 compaction error (/unii)`));
-        _$effect((_$p) => _$setProp(_el$25, "style", {
+    var _el$43 = _$createElement("text"), _el$44 = _$createElement("span"), _el$46 = _$createElement("span");
+    _$insertNode(_el$43, _el$44);
+    _$insertNode(_el$43, _el$46);
+    _$insertNode(_el$44, _$createTextNode(`UniiChat: `));
+    _$insert(_el$46, label);
+    _$insert(_el$43, (() => {
+      var _c$3 = _$memo(() => !!(chatError() && !failed()));
+      return () => _c$3() ? (() => {
+        var _el$47 = _$createElement("span");
+        _$insertNode(_el$47, _$createTextNode(` \xB7 compaction error (/unii)`));
+        _$effect((_$p) => _$setProp(_el$47, "style", {
           fg: ctx.theme.text.feedback.error.base
         }, _$p));
-        return _el$25;
+        return _el$47;
       })() : null;
     })(), null);
     _$effect((_p$) => {
-      var _v$1 = {
+      var _v$12 = {
         fg: ctx.theme.text.muted
-      }, _v$10 = {
+      }, _v$13 = {
         fg: color()
       };
-      _v$1 !== _p$.e && (_p$.e = _$setProp(_el$22, "style", _v$1, _p$.e));
-      _v$10 !== _p$.t && (_p$.t = _$setProp(_el$24, "style", _v$10, _p$.t));
+      _v$12 !== _p$.e && (_p$.e = _$setProp(_el$44, "style", _v$12, _p$.e));
+      _v$13 !== _p$.t && (_p$.t = _$setProp(_el$46, "style", _v$13, _p$.t));
       return _p$;
     }, {
       e: undefined,
       t: undefined
     });
-    return _el$21;
+    return _el$43;
   })();
 }
 var tui_default = Plugin.define({

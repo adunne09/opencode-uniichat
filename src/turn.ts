@@ -25,7 +25,9 @@ export function childItems(sessionID: string, items: readonly Item[]): Item[] {
 }
 
 export function lastUsage(rows: readonly Row[]) {
-  const row = rows.findLast((row) => row.type === "assistant");
+  // Prefer the last finished step: the one still streaming has no usage yet.
+  const row = rows.findLast((row) => row.type === "assistant" && row.time.completed !== undefined)
+    ?? rows.findLast((row) => row.type === "assistant");
   if (row?.type !== "assistant") return null;
   return {
     input: row.tokens?.input ?? 0,

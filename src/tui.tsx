@@ -26,13 +26,27 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+const tokens = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1_000 ? `${(n / 1_000).toFixed(1)}K` : String(n);
+const duration = (ms: number) => ms >= 60_000 ? `${(ms / 60_000).toFixed(1)} min` : ms >= 1_000 ? `${(ms / 1_000).toFixed(1)} s` : `${Math.round(ms)} ms`;
+const kilobytes = (bytes: number) => `${(bytes / 1000).toFixed(1)} KB`;
+
 function usageLabel(usage: Status["lastTurn"]): string {
-  if (!usage) return "not available";
-  const cost = Number.isFinite(usage.cost) ? ` · $${usage.cost.toFixed(4)}` : "";
-  return `cache read/write ${usage.cacheRead}/${usage.cacheWrite}${cost}`;
+  if (!usage) return "none yet";
+  const parts = [
+    `${tokens(usage.input)} in`,
+    `${tokens(usage.output)} out`,
+    `cache ${tokens(usage.cacheRead)} read / ${tokens(usage.cacheWrite)} write`,
+  ];
+  if (Number.isFinite(usage.cost) && usage.cost > 0) parts.push(`$${usage.cost.toFixed(2)}`);
+  if (usage.ms !== undefined) parts.push(duration(usage.ms));
+  return parts.join("  ·  ");
 }
 
 const LINE = /^(\d+)\+(\d+)\|/;
+// A summary or message starts with its kind ("user:", "echo1269:", "tool1203:"...).
+const KIND = /^(user|unii|tool|echo|work|note)(\d*):/;
+// Blank rows between list entries, so wrapped lines don't run into each other.
+const ROW_GAP = 1;
 const WORK = /^work: \[([^\]\s]+)\]/;
 
 // One screen of the browser: the live view, the two lines a zoom opened, or a whole message.
@@ -105,7 +119,7 @@ function Popup(props: { ctx: Context; sessionID: string }) {
     while (budget > 0) {
       const next = index + direction;
       if (next < 0 || next >= rows.length) break;
-      budget -= Math.max(1, rows[next]!.height);
+      budget -= Math.max(1, rows[next]!.height) + ROW_GAP;
       index = next;
     }
     select(index);
@@ -199,84 +213,191 @@ function Popup(props: { ctx: Context; sessionID: string }) {
     if (timer !== undefined) clearTimeout(timer);
   });
 
-  const crumbs = () => ["View", ...stack().map((level) => level.title)].join(" › ");
-  const hint = () => {
+  const theme = ctx.theme;
+  const titles = () => ["View", ...stack().map((level) => level.title)];
+  const position = () => {
     const level = current();
-    if (level.kind === "list") return "↑/↓ select · Enter or click zoom · Esc " + (stack().length ? "back" : "close");
-    return `↑/↓ scroll${level.agent ? ` · Enter open agent ${level.agent}` : ""} · Esc back`;
+    return level.kind === "list" && level.lines.length > 0 ? `${level.selected + 1} / ${level.lines.length}` : "";
+  };
+  const keys = (): [string, string][] => {
+    const level = current();
+    const esc: [string, string] = ["esc", stack().length ? "back" : "close"];
+    if (level.kind === "list") return [["↑↓", "select"], ["pgup/pgdn", "page"], ["enter", "zoom in"], esc];
+    return [["↑↓", "scroll"], ...(level.agent ? [["enter", `open agent ${level.agent}`] as [string, string]] : []), esc];
+  };
+  const notice = () => busy() ? "Loading…"
+    : zoomError() ? `Zoom error: ${zoomError()}`
+    : stack().length === 0 && viewError() ? `View error: ${viewError()}`
+    : stack().length === 0 && loading() ? "Loading view…"
+    : stack().length === 0 && lines().length === 0 ? "The view is empty. It fills up as the chat goes on."
+    : undefined;
+
+  // One label/value row of the status block.
+  const Stat = (row: { label: string; children: any }) => (
+    <box flexDirection="row" flexShrink={0}>
+      <text width={13} flexShrink={0} fg={theme.text.muted}>{row.label}</text>
+      <text flexGrow={1} fg={theme.text.base} wrapMode="none">{row.children}</text>
+    </box>
+  );
+  // A function, not one shared node: Solid would move a reused node to its last place.
+  const dot = () => <span style={{ fg: theme.text.muted }}>{"  ·  "}</span>;
+
+  // The id+n head of a line, padded so the text column lines up.
+  const gutter = (lines: string[]) => Math.max(4, ...lines.map((line) => LINE.exec(line)?.[0].length ?? 0)) + 1;
+  const Line = (row: { line: string; selected: boolean; width: number }) => {
+    const head = LINE.exec(row.line);
+    const body = head ? row.line.slice(head[0].length) : row.line;
+    const kind = KIND.exec(body);
+    const fg = () => row.selected ? theme.text.action.primary.focused : theme.text.base;
+    const kindColor = () => row.selected ? theme.text.action.primary.focused
+      : kind?.[1] === "user" ? theme.text.action.primary.base
+      : kind?.[1] === "unii" ? theme.text.feedback.success.base
+      : kind?.[1] === "work" ? theme.text.feedback.warning.base
+      : theme.text.muted;
+    return (
+      <box flexDirection="row" paddingLeft={1} paddingRight={1}>
+        <text width={row.width} flexShrink={0} fg={row.selected ? theme.text.action.primary.focused : theme.text.muted}>
+          {head ? `${head[1]}+${head[2]}` : ""}
+        </text>
+        <text flexGrow={1} flexShrink={1} fg={fg()}>
+          {kind ? <span style={{ fg: kindColor() }}><b>{kind[0]}</b></span> : null}
+          {kind ? body.slice(kind[0].length) : body}
+        </text>
+      </box>
+    );
   };
 
   return (
-    <box height={outer() - 1} paddingLeft={2} paddingRight={2} paddingBottom={1} gap={1}>
-      <box flexDirection="row" justifyContent="space-between" flexShrink={0}>
-        <text fg={ctx.theme.text.base}><b>UniiChat</b></text>
-        <text fg={ctx.theme.text.muted} onMouseUp={() => ctx.ui.dialog.clear()}>esc</text>
+    <box height={outer() - 1} paddingLeft={2} paddingRight={2} paddingBottom={1}>
+      {/* Title bar */}
+      <box flexDirection="row" justifyContent="space-between" flexShrink={0} paddingBottom={1}>
+        <text>
+          <span style={{ fg: theme.text.base }}><b>UniiChat</b></span>
+          <Show when={status()}>
+            {(current) => current().on
+              ? <span style={{ fg: theme.text.feedback.success.base }}>{"   ● on"}</span>
+              : <span style={{ fg: theme.text.muted }}>{"   ○ off"}</span>}
+          </Show>
+        </text>
+        <text fg={theme.text.muted} onMouseUp={() => ctx.ui.dialog.clear()}>esc</text>
       </box>
+
+      {/* Status */}
       <Show when={status()} fallback={
-        <Show when={!statusError()}><text flexShrink={0} fg={ctx.theme.text.muted}>Loading status…</text></Show>
+        <text flexShrink={0} fg={statusError() ? theme.text.feedback.error.base : theme.text.muted}>
+          {statusError() ? `Status error: ${statusError()}` : "Loading status…"}
+        </text>
       }>
-        {(current) => (
-          <box flexShrink={0}>
-            <text fg={ctx.theme.text.base}>
-              {`${current().on ? "ON" : "OFF"} · pending compactions ${current().chat?.pending ?? 0} · active ${current().chat?.inFlight ?? 0} · view ${((current().chat?.viewBytes ?? 0) / 1000).toFixed(1)} KB`}
-            </text>
-            <text fg={ctx.theme.text.muted}>
-              {`Turn: ${usageLabel(current().lastTurn)}${current().lastTurn?.ms !== undefined ? ` · ${current().lastTurn?.ms} ms` : ""}`}
-            </text>
-            <text fg={ctx.theme.text.muted}>
-              {`Compaction: ${current().chat?.last ? `last ${current().chat!.last!.ms} ms` : "no call yet"} · ${current().chat?.total.calls ?? 0} calls`}
-            </text>
-            <Show when={current().chat?.lastError}>
-              {(message) => <text fg={ctx.theme.text.feedback.error.base} wrapMode="none">{`Last error: ${message().split("\n")[0]}`}</text>}
-            </Show>
-          </box>
+        {(current) => {
+          const chat = () => current().chat;
+          const active = () => (chat()?.pending ?? 0) + (chat()?.inFlight ?? 0) > 0;
+          return (
+            <box flexShrink={0}>
+              <Stat label="Memory">
+                {chat() ? `${kilobytes(chat()!.viewBytes)} view` : "not started"}
+                {chat() ? dot() : null}
+                {chat() ? `${chat()!.lines} lines` : null}
+              </Stat>
+              <Stat label="Compaction">
+                <span style={{ fg: active() ? theme.text.feedback.warning.base : theme.text.muted }}>
+                  {active() ? `${chat()!.inFlight} running, ${chat()!.pending} queued` : "idle"}
+                </span>
+                {dot()}
+                {chat()?.last ? `last took ${duration(chat()!.last!.ms)}` : "no call yet"}
+                {dot()}
+                {`${chat()?.total.calls ?? 0} calls`}
+              </Stat>
+              <Stat label="Last turn">{usageLabel(current().lastTurn)}</Stat>
+              <Show when={chat()?.lastError}>
+                {(message) => (
+                  <Stat label="Error">
+                    <span style={{ fg: theme.text.feedback.error.base }}>{message().split("\n")[0]}</span>
+                  </Stat>
+                )}
+              </Show>
+              <Show when={statusError()}>
+                {(message) => <Stat label="Status"><span style={{ fg: theme.text.feedback.error.base }}>{message()}</span></Stat>}
+              </Show>
+            </box>
+          );
+        }}
+      </Show>
+
+      {/* Breadcrumbs and position, over a rule */}
+      <box
+        flexDirection="row"
+        justifyContent="space-between"
+        flexShrink={0}
+        marginTop={1}
+        border={["bottom"]}
+        borderColor={theme.border.base}
+      >
+        <text>
+          <For each={titles()}>
+            {(title, index) => (
+              <>
+                {index() > 0 ? <span style={{ fg: theme.text.muted }}>{"  ›  "}</span> : null}
+                {index() === titles().length - 1
+                  ? <span style={{ fg: theme.text.base }}><b>{title}</b></span>
+                  : <span style={{ fg: theme.text.muted }}>{title}</span>}
+              </>
+            )}
+          </For>
+        </text>
+        <text fg={theme.text.muted}>{position()}</text>
+      </box>
+
+      <Show when={notice()}>
+        {(message) => (
+          <text flexShrink={0} paddingTop={1} fg={zoomError() || viewError() ? theme.text.feedback.error.base : theme.text.muted}>
+            {message()}
+          </text>
         )}
       </Show>
-      <Show when={statusError()}>
-        {(message) => <text flexShrink={0} fg={ctx.theme.text.feedback.error.base}>{`Status error: ${message()}`}</text>}
-      </Show>
-      <text flexShrink={0} fg={ctx.theme.text.base}>
-        {crumbs()}
-        <span style={{ fg: ctx.theme.text.muted }}>{` · ${hint()}`}</span>
-      </text>
-      <Show when={busy() || zoomError() || (stack().length === 0 && (viewError() || loading() || lines().length === 0))}>
-        <text flexShrink={0} fg={zoomError() || viewError() ? ctx.theme.text.feedback.error.base : ctx.theme.text.muted}>
-          {busy() ? "Loading…"
-            : zoomError() ? `Zoom error: ${zoomError()}`
-            : viewError() ? `View error: ${viewError()}`
-            : loading() ? "Loading view…" : "View empty."}
-        </text>
-      </Show>
+
       <scrollbox
         ref={(element: ScrollBoxRenderable) => (scroll = element)}
         flexGrow={1}
         flexShrink={1}
         minHeight={1}
+        marginTop={1}
         scrollX={false}
-        contentOptions={{ minHeight: 0 }}
+        contentOptions={{ minHeight: 0, gap: ROW_GAP }}
         scrollbarOptions={{ visible: false }}
       >
         <Show when={current().kind === "list" ? current() as Extract<Level, { kind: "list" }> : undefined} fallback={
-          <text fg={ctx.theme.text.base}>{(current() as Extract<Level, { kind: "text" }>).text}</text>
+          <text paddingLeft={1} paddingRight={1} fg={theme.text.base}>{(current() as Extract<Level, { kind: "text" }>).text}</text>
         }>
           {(level) => (
             <For each={level().lines}>
               {(line, index) => (
                 <box
-                  backgroundColor={index() === level().selected ? ctx.theme.background.action.primary.focused : RGBA.fromInts(0, 0, 0, 0)}
+                  backgroundColor={index() === level().selected ? theme.background.action.primary.focused : RGBA.fromInts(0, 0, 0, 0)}
                   onMouseDown={() => select(index())}
                   onMouseUp={() => {
                     select(index());
                     zoomIn();
                   }}
                 >
-                  <text fg={index() === level().selected ? ctx.theme.text.action.primary.focused : ctx.theme.text.base}>{line}</text>
+                  <Line line={line} selected={index() === level().selected} width={gutter(level().lines)} />
                 </box>
               )}
             </For>
           )}
         </Show>
       </scrollbox>
+
+      {/* Key hints */}
+      <box flexDirection="row" flexShrink={0} gap={3} paddingTop={1} border={["top"]} borderColor={theme.border.base}>
+        <For each={keys()}>
+          {([key, label]) => (
+            <text>
+              <span style={{ fg: theme.text.base }}><b>{key}</b></span>
+              <span style={{ fg: theme.text.muted }}>{` ${label}`}</span>
+            </text>
+          )}
+        </For>
+      </box>
     </box>
   );
 }
