@@ -1,5 +1,5 @@
 import { Cause, Data, Deferred, Effect, Exit, Semaphore } from "effect";
-import * as anthropic from "./anthropic.ts";
+import type * as compactor from "./compactor.ts";
 import * as record from "./record.ts";
 import * as tree from "./tree.ts";
 import * as view from "./view.ts";
@@ -15,19 +15,19 @@ export interface Item {
   files?: readonly { name: string; mime: string; data?: Uint8Array }[];
 }
 export interface Deps {
-  compact: (input: anthropic.Input) => Effect.Effect<anthropic.Output, unknown>;
-  model: Effect.Effect<{ modelID: string; cost: Parameters<typeof anthropic.price>[1] }>;
-  token: Effect.Effect<string>;
+  compact: (input: compactor.Input) => Effect.Effect<compactor.Output, unknown>;
 }
 export class ChatError extends Data.TaggedError("ChatError")<{ message: string }> {}
 export interface ToolResult {
   text: string;
   files?: { mime: string; data: Uint8Array }[];
 }
-type Usage = anthropic.Output["usage"] & { cost: number; ms: number };
-const emptyUsage = (): Usage => ({ input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0, ms: 0 });
+// OpenCode's generate API reports no token usage, so compaction calls are counted and timed only.
+type Usage = { calls: number; ms: number };
+const emptyUsage = (): Usage => ({ calls: 0, ms: 0 });
 // A compaction call that hangs (no response, stalled stream) must not block awaitSummarized forever.
-export const COMPACT_TIMEOUT_MS = 4 * 60_000;
+// `tries` bounds the recipe's "Too long" loop. Both are set from the plugin options.
+export const COMPACTION = { timeoutMs: 4 * 60_000, tries: 5 };
 const key = (ref: tree.Ref) => `${ref[0]}:${ref[1]}`;
 function extension(mime: string): string {
   const type = mime.split(";")[0]!.trim().toLowerCase();
@@ -50,10 +50,10 @@ export class Chat {
   private chat: view.View;
   private comp: view.View;
   private systemText: string | undefined;
-  private tools: anthropic.Input["tools"] | undefined;
+  private tools: compactor.Input["tools"] | undefined;
   private changed = Deferred.makeUnsafe<void>();
   private readonly writes = new Set<{ lines: string[]; started: Deferred.Deferred<void> }>();
-  private last: Usage | undefined;
+  private last: { ms: number } | undefined;
   private total = emptyUsage();
   private lastError: string | undefined;
   private T: number;
@@ -240,7 +240,6 @@ export class Chat {
   private compact(ref: tree.Ref): Effect.Effect<string, unknown> {
     const self = this;
     return Effect.gen(function* () {
-      const model = yield* self.deps.model;
       const started = yield* Deferred.make<void>();
       let rendered: ReturnType<typeof view.blocks>;
       let registration: { lines: string[]; started: Deferred.Deferred<void> };
@@ -266,11 +265,11 @@ export class Chat {
       ] }];
       return yield* Effect.gen(function* () {
         let shortest: string | undefined;
-        for (let attempt = 0; attempt < 5; attempt++) {
-          const result = yield* self.deps.compact({ modelID: model.modelID, system, tools, turns, token: self.deps.token, ...(attempt === 0 ? { started } : {}) }).pipe(
+        for (let attempt = 0; attempt < COMPACTION.tries; attempt++) {
+          const result = yield* self.deps.compact({ system, tools, turns, ...(attempt === 0 ? { started } : {}) }).pipe(
             Effect.timeoutOrElse({
-              duration: COMPACT_TIMEOUT_MS,
-              orElse: () => Effect.fail(new ChatError({ message: `Compaction call timed out after ${COMPACT_TIMEOUT_MS / 1000}s` })),
+              duration: COMPACTION.timeoutMs,
+              orElse: () => Effect.fail(new ChatError({ message: `Compaction call timed out after ${COMPACTION.timeoutMs / 1000}s` })),
             }),
             Effect.exit,
           );
@@ -281,16 +280,17 @@ export class Chat {
             return yield* Effect.failCause(result.cause);
           }
           const out = result.value;
-          self.last = { ...out.usage, cost: anthropic.price(out.usage, model.cost), ms: out.ms };
-          for (const field of Object.keys(self.total) as (keyof Usage)[]) self.total[field] += self.last[field];
+          self.last = { ms: out.ms };
+          self.total.calls++;
+          self.total.ms += out.ms;
           const line = out.text?.trim();
           if (line === undefined) {
             if (shortest !== undefined) return shortest;
-            return yield* Effect.fail(new ChatError({ message: noTextMessage(out) }));
+            return yield* Effect.fail(new ChatError({ message: noTextMessage() }));
           }
           if (shortest === undefined || record.utf8Size(line) < record.utf8Size(shortest)) shortest = line;
           if (record.utf8Size(line) <= 512) return line;
-          if (attempt === 4) break;
+          if (attempt === COMPACTION.tries - 1) break;
           const previous = turns.at(-1)!;
           turns = [
             ...turns.slice(0, -1),
@@ -493,7 +493,7 @@ export class Chat {
 
   system() { return this.systemText; }
 
-  setTools(snapshot: anthropic.Input["tools"]) {
+  setTools(snapshot: compactor.Input["tools"]) {
     const self = this;
     return this.mutex.withPermits(1)(Effect.gen(function* () {
       self.tools = structuredClone(snapshot);
@@ -515,13 +515,8 @@ export class Chat {
   }
 }
 
-export function noTextMessage(out: anthropic.Output) {
-  const why = [
-    out.finish ? `stop ${out.finish}` : undefined,
-    out.toolCalls?.length ? `called ${out.toolCalls.join(", ")}` : undefined,
-    `${out.usage.output} output tokens (${out.usage.reasoning} reasoning)`,
-  ].filter(Boolean).join(", ");
-  return `Compaction returned no text: ${why}`;
+export function noTextMessage() {
+  return "Compaction returned no text. OpenCode does not report why; usually the model spent its whole output limit on thinking (raise compaction.maxTokens or lower its effort) or called a tool.";
 }
 
 const registry = new Map<string, Deferred.Deferred<Chat, StoreError>>();

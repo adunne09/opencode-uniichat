@@ -3,8 +3,8 @@ import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { Deferred, Effect, Fiber, Queue } from "effect";
 import { TestClock } from "effect/testing";
-import { Chat, noTextMessage, COMPACT_TIMEOUT_MS, type Deps, type Item } from "./chat.ts";
-import type { Input, Output } from "./anthropic.ts";
+import { Chat, COMPACTION, type Deps, type Item } from "./chat.ts";
+import type { Input, Output } from "./compactor.ts";
 import { Store, StoreError } from "./store.ts";
 import { clipEcho, formatDate, utf8Size } from "./record.ts";
 import { leafTask, mergeTask, tooLong } from "./prompts.ts";
@@ -12,9 +12,8 @@ import { leafTask, mergeTask, tooLong } from "./prompts.ts";
 const run = Effect.runPromise;
 const temp = () => mkdtempSync("/tmp/opencode/uniichat-chat-");
 const item = (i: number, text = `message ${i}`, kind: Item["kind"] = "user"): Item => ({ kind, text, date: 1791547200000, src: `msg_${i}` });
-const output = (text: string | undefined): Output => ({ text, usage: { input: 10, output: 20, reasoning: 3, cacheRead: 40, cacheWrite: 50 }, ms: 7 });
-const model = { modelID: "fake-haiku", cost: [{ input: 1, output: 2, cache: { read: 0.1, write: 1.25 } }] };
-const deps = (compact: Deps["compact"] = () => Effect.succeed(output("summary"))): Deps => ({ compact, model: Effect.succeed(model), token: Effect.succeed("fake-token") });
+const output = (text: string | undefined): Output => ({ text, ms: 7 });
+const deps = (compact: Deps["compact"] = () => Effect.succeed(output("summary"))): Deps => ({ compact });
 const flush = Effect.gen(function* () { for (let i = 0; i < 50; i++) yield* Effect.yieldNow; });
 const ready = Effect.fn("ready")(function* (chat: Chat) {
   yield* chat.setSystem("frozen system");
@@ -105,8 +104,6 @@ test("requires both system and tools, then sends exact context blocks and merge 
     tools[0]!.description = "changed externally";
     const call = yield* Queue.take(fake.calls);
     expect(call.input.system).toBe("system");
-    expect(call.input.modelID).toBe("fake-haiku");
-    expect(yield* call.input.token).toBe("fake-token");
     expect(call.input.tools[0]!.description).toBe("zoom tool");
     expect(call.input.turns).toEqual([{ role: "user", parts: [
       { text: "<chat>\n0+1|user: 0\n1+1|user: 1\n2+1|user: 2\n3+1|user: 3\n", cache: true },
@@ -189,7 +186,7 @@ test("only the last whole block is marked, and an empty tail closes chat", async
   ]);
 });
 
-test("too-long loop keeps the shortest of five, one end mark, usage and price", async () => {
+test("too-long loop keeps the shortest of five, one end mark, calls and time", async () => {
   const dir = temp();
   const requests: Input[] = [];
   const sizes = [600, 550, 700, 520, 530];
@@ -214,9 +211,8 @@ test("too-long loop keeps the shortest of five, one end mark, usage and price", 
     }
   }
   const status = chat.status();
-  expect(status.last).toEqual({ ...output("").usage, ms: 7, cost: 0.0001225 });
-  expect(status.total.cacheRead).toBe(200);
-  expect(status.total.cacheWrite).toBe(250);
+  expect(status.last).toEqual({ ms: 7 });
+  expect(status.total.calls).toBe(5);
   expect(status.total.ms).toBe(35);
 });
 
@@ -272,11 +268,6 @@ test("a no-text first reply fails, and replay alone does not retry it", async ()
   }));
 });
 
-test("a no-text error says why the model stopped", () => {
-  const out = { ...output(undefined), finish: "tool_use", toolCalls: ["zoom"] };
-  expect(noTextMessage(out)).toBe(`Compaction returned no text: stop tool_use, called zoom, ${out.usage.output} output tokens (${out.usage.reasoning} reasoning)`);
-});
-
 test("awaitSummarized retries with 1s then 2s backoff under TestClock", async () => {
   await run(Effect.gen(function* () {
     let calls = 0;
@@ -310,7 +301,7 @@ test("a hung compaction call times out and is retried instead of blocking awaitS
     expect(chat.status().inFlight).toBe(1);
     const wait = yield* Effect.forkChild(chat.awaitSummarized());
     yield* flush;
-    yield* TestClock.adjust(COMPACT_TIMEOUT_MS - 1);
+    yield* TestClock.adjust(COMPACTION.timeoutMs - 1);
     yield* flush;
     expect(chat.status().failed).toBe(0);
     yield* TestClock.adjust(1);

@@ -50,6 +50,9 @@ class MergeHeap {
   }
 }
 
+/** Compaction calls in flight at once (recipe: 8); set from the plugin options. */
+export const QUEUE = { slots: 8 };
+
 export class WorkQueue {
   T = 0;
   p = 0;
@@ -178,7 +181,7 @@ export class WorkQueue {
   drain(fits: (ref: Ref) => string | undefined, freeSlots: number): { instant: [Ref, string][]; start: Ref[] } {
     const instant: [Ref, string][] = [];
     const start: Ref[] = [];
-    let slots = Math.max(0, Math.min(Math.floor(freeSlots), 8 - this.inFlight.size));
+    let slots = Math.max(0, Math.min(Math.floor(freeSlots), QUEUE.slots - this.inFlight.size));
     const complete = (ref: Ref, text: string): void => {
       this.instantPending.add(key(ref));
       instant.push([ref, text]);

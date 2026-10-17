@@ -126,9 +126,38 @@ need a detail. Then comes your task: carry it out with your tools and end with
 your report as your final reply.`;
 
 export const BTW_LOOKUP_NOTE = `[Before this side question is answered: if your memory above lacks a detail
-you need, open it now with zoom(id, n) or date(id); no other tool is available.
-When you have what you need, or need nothing, reply only READY. The answer comes
-in the next request.]`;
+you need, open it now by replying only with calls, one per line, written as
+zoom(id, n), zoom("Name") or date(id); no other tool is available. Their results
+come back in the next message. When you have what you need, or need nothing,
+reply only READY. The answer comes in a later request.]`;
+
+export interface LookupCall { name: "zoom" | "date"; id: number | string; n?: number; text: string }
+
+const CALL = /^\s*`?(zoom|date)\(\s*(?:"([^"]*)"|(\d+))\s*(?:,\s*(\d+)\s*)?\)`?\s*$/;
+
+/** The zoom/date calls a /btw lookup reply asks for, one per line; none if it says READY or anything else. */
+export function lookupCalls(reply: string): LookupCall[] {
+  const calls: LookupCall[] = [];
+  for (const line of reply.split("\n")) {
+    const match = CALL.exec(line);
+    if (!match) continue;
+    const [, name, agent, id, n] = match;
+    if (name === "date" && (agent !== undefined || n !== undefined)) continue;
+    calls.push({
+      name: name as LookupCall["name"],
+      id: agent ?? Number(id),
+      ...(n === undefined ? {} : { n: Number(n) }),
+      text: line.trim().replace(/^`|`$/g, ""),
+    });
+  }
+  return calls;
+}
+
+export function lookupResults(results: readonly { call: string; text: string }[]) {
+  return `${results.map((item) => `> ${item.call}\n${item.text}`).join("\n\n")}
+
+[Reply with more calls, one per line, or only READY.]`;
+}
 
 export function btwMemory(opened: readonly { call: string; text: string }[]) {
   if (opened.length === 0) return undefined;

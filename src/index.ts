@@ -9,18 +9,24 @@ import { Cause, Data, Effect, Exit, Layer, Schema, Semaphore, Stream } from "eff
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import * as engine from "./chat.ts";
-import * as anthropic from "./anthropic.ts";
+import * as compactor from "./compactor.ts";
+import * as transports from "./transport.ts";
+import * as config from "./options.ts";
 import * as env from "./env.ts";
 import * as history from "./history.ts";
 import * as turn from "./turn.ts";
 import { toMessages } from "./messages.ts";
 import { chatDir } from "./store.ts";
-import { BTW_LOOKUP_NOTE, btwMemory, SUBAGENT_NOTE, SYSTEM_PROMPT, systemText, stateText, ZOOM_DESCRIPTION, DATE_DESCRIPTION } from "./prompts.ts";
+import { btwMemory, lookupCalls, lookupResults, systemText, stateText, ZOOM_DESCRIPTION, DATE_DESCRIPTION } from "./prompts.ts";
 import { UniiChatRpc, statusValue } from "./rpc.ts";
 
 export class IntegrationError extends Data.TaggedError("UniiChatIntegrationError")<{ message: string }> {}
 type Chat = Pick<engine.Chat, "log" | "logAgent" | "agentName" | "system" | "setSystem" | "setTools" | "awaitSummarized" | "renderView" | "zoom" | "date" | "status" | "latestSource" | "undoneFrom" | "rewind">;
 export interface IntegrationOptions {
+  /** Plugin options; defaults to `ctx.options`. */
+  options?: unknown;
+  /** Replaces OpenCode-backed model calls (tests). */
+  transport?: Pick<transports.Transport, "run" | "apply" | "owns">;
   get?: (sessionID: string, deps: engine.Deps) => Effect.Effect<Chat, unknown>;
   sources?: (sessionID: string) => Effect.Effect<Set<string>, unknown>;
   older?: (sessionID: string, has: (row: history.Row) => boolean) => Effect.Effect<readonly history.Row[] | undefined, unknown>;
@@ -91,24 +97,33 @@ export function restoreTurn(rows: readonly history.Row[], messages: readonly Mes
 }
 
 export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {}) => Effect.gen(function* () {
-  const compactor = yield* Layer.build(anthropic.layer());
-  const deps: engine.Deps = {
-    compact: (input) => anthropic.generate(input).pipe(Effect.provide(compactor)),
-    model: Effect.gen(function* () {
-      const model = env.latestHaiku((yield* ctx.model.list()).data);
-      if (!model) return yield* Effect.die(new Error("UniiChat needs an available Anthropic Haiku model for compaction."));
-      return model;
-    }).pipe(Effect.orDie),
-    token: Effect.gen(function* () {
-      const connection = yield* ctx.integration.connection.active("anthropic");
-      const credential = connection ? yield* ctx.integration.connection.resolve(connection) : undefined;
-      if (credential?.type !== "oauth") return yield* Effect.die(new Error("UniiChat needs an active Anthropic OAuth connection."));
-      return credential.access;
-    }).pipe(Effect.orDie),
-  };
-  const get = (sessionID: string) => (options.get ?? engine.get)(sessionID, deps);
+  const settings = config.parse(options.options ?? ctx.options);
+  config.configure(settings);
+  const transport = options.transport ?? transports.make(ctx);
+  // The compaction model: the configured one, else the newest Anthropic Claude Haiku OpenCode lists.
+  let chosen: compactor.Model | undefined;
+  const compactionModel = Effect.gen(function* () {
+    if (chosen) return chosen;
+    if (settings.compaction.model) return chosen = config.modelRef(settings.compaction.model, settings.compaction.variant);
+    const haiku = env.latestHaiku((yield* ctx.model.list()).data);
+    if (!haiku) return yield* Effect.fail(error("UniiChat found no Claude Haiku model for compaction; set the plugin option compaction.model to \"providerID/modelID\"."));
+    return chosen = { providerID: "anthropic", id: haiku.modelID, ...(settings.compaction.variant ? { variant: settings.compaction.variant } : {}) };
+  });
+  const depsFor = (sessionID: string): engine.Deps => ({
+    compact: (input) => Effect.gen(function* () {
+      const model = yield* compactionModel;
+      const providerOptions = settings.compaction.providerOptions
+        ?? (model.providerID === "anthropic" && !model.variant ? config.ANTHROPIC_DEFAULTS : {});
+      return yield* compactor.generate(transport, {
+        ...input, parentID: sessionID, model,
+        options: { maxTokens: settings.compaction.maxTokens, ...structuredClone(providerOptions) },
+      });
+    }),
+  });
+  const get = (sessionID: string) => (options.get ?? engine.get)(sessionID, depsFor(sessionID));
   const state = (sessionID: string) => ctx.storage.get(`session/${sessionID}`).pipe(Effect.map((value): turn.Switch => {
-    if (!value || typeof value !== "object" || Array.isArray(value)) return { on: false };
+    // A session never switched follows the defaultOn option.
+    if (!value || typeof value !== "object" || Array.isArray(value)) return settings.defaultOn ? { on: true, render: true } : { on: false };
     const record = value as { on?: unknown; render?: unknown };
     return { on: record.on === true, render: record.render === true };
   }));
@@ -242,6 +257,7 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
 
   yield* ctx.session.hook("context", (event) => serialized(event.sessionID, Effect.gen(function* () {
     const sessionID = event.sessionID;
+    if (transport.owns(sessionID)) return;
     const switchState = yield* state(sessionID);
     const parentID = yield* parent(sessionID);
     const child = parentID !== undefined && (yield* isEnabled(parentID));
@@ -268,7 +284,7 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
       yield* chat.logAgent(name, turn.childItems(sessionID, history.items(rows, { name: (childID) => nameFor(chat, rows, childID) })));
     } else {
       if (first && (switchState.render || chat.system() === undefined)) {
-        yield* chat.setSystem(systemText(SYSTEM_PROMPT, history.extractCatalog(event.system), yield* env.agentsMd(location), history.extractSkills(event.system)));
+        yield* chat.setSystem(systemText(settings.prompts.system, history.extractCatalog(event.system), yield* env.agentsMd(location), history.extractSkills(event.system)));
         yield* ctx.storage.set(`session/${sessionID}`, { on: switchState.on });
       }
       yield* chat.setTools(Object.entries(event.tools).map(([name, tool]) => ({ name, ...tool })));
@@ -283,7 +299,7 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
     }
     if (child) {
       // A child keeps its own agent's system prompt (D15, revised Oct 12); only a note on the view is added.
-      event.system = [...event.system, { type: "text", text: SUBAGENT_NOTE }];
+      event.system = [...event.system, { type: "text", text: settings.prompts.subagent }];
     } else {
       const system = chat.system();
       if (system === undefined) return yield* Effect.fail(error("UniiChat's system prompt is not initialized."));
@@ -302,30 +318,33 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
 
   // /btw (session.generate) runs one model call with no tool loop. Give it Unii's prompt, the view
   // and the raw turn in progress instead of OpenCode's whole uncompacted history, which Unii keeps
-  // growing because native compaction is skipped. zoom/date run here first, in a lookup loop of our own.
-  const LOOKUP_STEPS = 8;
-  const lookup = Effect.fn(function* (chat: Chat, input: { modelID: string; system: string; tools: Record<string, { description: string; input: unknown }>; messages: Message[] }) {
-    const tools = Object.entries(input.tools).filter(([name]) => name === "zoom" || name === "date").map(([name, tool]) => ({ name, description: tool.description, input: tool.input }));
+  // growing because native compaction is skipped. Before it, the model may open memory: zoom/date
+  // calls written as text (OpenCode's generate API returns text only), answered here, in a loop.
+  const lookup = Effect.fn(function* (chat: Chat, input: { sessionID: string; model: compactor.Model; system: string; messages: Message[] }) {
     const convo = [...input.messages];
     const opened: { call: string; text: string }[] = [];
-    for (let i = 0; i < LOOKUP_STEPS; i++) {
-      const reply = yield* anthropic.step({ modelID: input.modelID, system: input.system, tools, messages: convo, token: deps.token }).pipe(Effect.provide(compactor));
-      const calls = reply.content.flatMap((part) => part.type === "tool-call" ? [part] : []);
-      if (calls.length === 0 || calls.some((call) => call.name !== "zoom" && call.name !== "date")) break;
-      convo.push(reply);
+    for (let i = 0; i < settings.btw.lookupSteps; i++) {
+      const reply = yield* transport.run({
+        parentID: input.sessionID, model: input.model, system: input.system, messages: convo, tools: [],
+        options: { maxTokens: settings.btw.maxTokens },
+      });
+      const calls = lookupCalls(reply);
+      if (calls.length === 0) break;
+      const results: { call: string; text: string }[] = [];
       for (const call of calls) {
-        const args = (call.input ?? {}) as { id?: number | string; n?: number };
-        const text = yield* (call.name === "zoom" ? chat.zoom(args.id as number | string, args.n) : chat.date(args.id as number)).pipe(
+        const text = yield* (call.name === "zoom" ? chat.zoom(call.id, call.n) : chat.date(call.id as number)).pipe(
           Effect.map((result) => result.text),
           Effect.catchCause((cause) => Effect.succeed(`Error: ${Cause.pretty(cause)}`)),
         );
-        opened.push({ call: `${call.name}(${JSON.stringify(call.input)})`, text });
-        convo.push(Message.tool({ id: call.id, name: call.name, result: text, resultType: "text" }));
+        results.push({ call: call.text, text });
       }
+      opened.push(...results);
+      convo.push(transports.textMessage("assistant", [{ text: reply }]), transports.userMessage([{ text: lookupResults(results) }]));
     }
     return opened;
   });
   yield* ctx.session.hook("generate", (event) => Effect.gen(function* () {
+    if (transport.apply(event as transports.GenerateEvent)) return;
     const sessionID = event.sessionID;
     if ((yield* parent(sessionID)) !== undefined || !(yield* isEnabled(sessionID))) return;
     const { rows, rebuilt } = yield* turnHistory(sessionID);
@@ -342,8 +361,8 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
       .filter((item) => item.kind === "work").map((item) => [item.src, item.text]));
     const raw = rebuilt ? restoreTurn(rows, event.messages, event.model) : event.messages;
     const build = (extra?: string) => history.btwRequest({ messages: raw, turnIds: current.ids, view, reports, extra }).map((message) => Message.make(message));
-    const opened = event.model.providerID === "anthropic"
-      ? yield* lookup(chat, { modelID: event.model.id, system, tools: event.tools, messages: build(BTW_LOOKUP_NOTE) }).pipe(
+    const opened = settings.btw.lookupSteps > 0
+      ? yield* lookup(chat, { sessionID, model: event.model, system, messages: build(settings.prompts.btwLookup) }).pipe(
         Effect.catchCause((cause) => Effect.logWarning("UniiChat /btw memory lookup failed; answering from the view", cause).pipe(Effect.as([]))),
       )
       : [];
@@ -409,6 +428,7 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
   yield* ctx.event.subscribe().pipe(Stream.runForEach((event) => {
     if (event.type !== "session.execution.succeeded" && event.type !== "session.execution.failed" && event.type !== "session.execution.interrupted") return Effect.void;
     const sessionID = event.data.sessionID;
+    if (transport.owns(sessionID)) return Effect.void;
     return serialized(sessionID, Effect.gen(function* () {
       const parentID = yield* parent(sessionID);
       const child = parentID !== undefined && (yield* isEnabled(parentID));

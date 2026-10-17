@@ -53,7 +53,7 @@ function fixture(initial: Row[], on = true) {
       return undefined;
     },
     rewind: (k: number) => Effect.sync(() => logged.splice(k).map((item) => item.src.split(":")[0]!)),
-    status: () => ({ T: 0, viewBytes: 0, compViewBytes: 0, lines: 0, inFlight: 0, pending: 0, failed: 0, lastError: undefined, last: undefined, total: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0, ms: 0 } }),
+    status: () => ({ T: 0, viewBytes: 0, compViewBytes: 0, lines: 0, inFlight: 0, pending: 0, failed: 0, lastError: undefined, last: undefined, total: { calls: 0, ms: 0 } }),
   };
   let contextReads = 0;
   const childID = Session.ID.make(`${sessionID}_child`);
@@ -309,10 +309,8 @@ for (const state of ["fresh", "compacted", "failed"] as const) {
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       const chat = yield* Chat.open(mkdtempSync("/tmp/opencode/uniichat-rpc-"), {
         compact: () => state === "failed" ? Effect.fail("compaction failed") : Effect.succeed({
-          text: "summary", usage: { input: 10, output: 20, reasoning: 0, cacheRead: 30, cacheWrite: 40 }, ms: 7,
+          text: "summary", ms: 7,
         }),
-        model: Effect.succeed({ modelID: "fake", cost: [{ input: 1, output: 2, cache: { read: 0.1, write: 1 } }] }),
-        token: Effect.succeed("fake"),
       });
       f.options.get = () => Effect.succeed(chat);
       yield* integrate(f.ctx, f.options);
@@ -340,7 +338,7 @@ for (const state of ["fresh", "compacted", "failed"] as const) {
       expect(chat.status()).toStrictEqual(JSON.parse(JSON.stringify(chat.status())));
       const status = outputs[1];
       expect(status.lastTurn).toBeNull();
-      if (state === "compacted") expect(status.chat.last.input).toBe(10);
+      if (state === "compacted") expect(status.chat.last.ms).toBe(7);
       if (state === "failed") expect(status.chat.lastError).toContain("compaction failed");
     })));
   });
@@ -353,9 +351,8 @@ test("status projects finite wire usage without leaking undefined, DateTime, or 
     ...chat,
     status: () => ({
       ...chat.status(),
-      last: { input: NaN, output: Infinity, reasoning: undefined as unknown as number, cacheRead: 3, cacheWrite: 4, cost: -Infinity, ms: NaN,
-        date: DateTime.makeUnsafe(1000), map: new Map([["secret", "value"]]) },
-      total: { input: 1, output: 2, reasoning: 0, cacheRead: 3, cacheWrite: 4, cost: NaN, ms: Infinity },
+      last: { ms: NaN, date: DateTime.makeUnsafe(1000), map: new Map([["secret", "value"]]) } as unknown as { ms: number },
+      total: { calls: 2, ms: Infinity },
     }),
   })));
   await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
@@ -365,9 +362,8 @@ test("status projects finite wire usage without leaking undefined, DateTime, or 
       const status = yield* f.rpc().status({ sessionID: f.sessionID });
       expect(status).toStrictEqual(JSON.parse(JSON.stringify(status)));
       expect(UniiChatRpc.methods.status.output.parse(status)).toStrictEqual(status);
-      expect(status.chat.last).toEqual({ input: 0, output: 0, reasoning: 0, cacheRead: 3, cacheWrite: 4, cost: 0, ms: 0 });
-      expect(status.chat.total.cost).toBe(0);
-      expect(status.chat.total.ms).toBe(0);
+      expect(status.chat.last).toEqual({ ms: 0 });
+      expect(status.chat.total).toEqual({ calls: 2, ms: 0 });
       expect(status.lastTurn).toEqual({ input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, cost: 0, ...(completed === undefined ? {} : { ms: 500 }) });
     }
   })));

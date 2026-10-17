@@ -6,7 +6,15 @@ import { useTerminalDimensions } from "@opentui/solid";
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { UniiChatRpc } from "./rpc.ts";
 
-const POLL_INTERVAL_MS = 2_000;
+// The `tui` plugin options (see options.ts, which the server side validates).
+let POLL_INTERVAL_MS = 2_000;
+function tuiOptions(options: Readonly<Record<string, unknown>> | undefined) {
+  const tui = (options?.tui ?? {}) as { pollMs?: unknown; sidebar?: unknown };
+  return {
+    pollMs: typeof tui.pollMs === "number" && tui.pollMs > 0 ? tui.pollMs : 2_000,
+    sidebar: tui.sidebar !== false,
+  };
+}
 const rpcClient = (ctx: Context) => ctx.client.rpc(UniiChatRpc);
 type Status = Awaited<ReturnType<ReturnType<typeof rpcClient>["status"]>>;
 
@@ -216,7 +224,7 @@ function Popup(props: { ctx: Context; sessionID: string }) {
               {`Turn: ${usageLabel(current().lastTurn)}${current().lastTurn?.ms !== undefined ? ` · ${current().lastTurn?.ms} ms` : ""}`}
             </text>
             <text fg={ctx.theme.text.muted}>
-              {`Compaction: ${usageLabel(current().chat?.last ?? null)}${current().chat?.last ? ` · ${current().chat!.last!.ms} ms` : ""}`}
+              {`Compaction: ${current().chat?.last ? `last ${current().chat!.last!.ms} ms` : "no call yet"} · ${current().chat?.total.calls ?? 0} calls`}
             </text>
             <Show when={current().chat?.lastError}>
               {(message) => <text fg={ctx.theme.text.feedback.error.base} wrapMode="none">{`Last error: ${message().split("\n")[0]}`}</text>}
@@ -332,10 +340,12 @@ export default Plugin.define({
   id: "uniichat",
   setup(ctx) {
     if (!ctx.ui || typeof ctx.ui.slot !== "function") return;
-    const removeSidebar = ctx.ui.slot({
+    const settings = tuiOptions(ctx.options);
+    POLL_INTERVAL_MS = settings.pollMs;
+    const removeSidebar = settings.sidebar ? ctx.ui.slot({
       append: "sidebar.content",
       render: (input) => <SidebarIndicator ctx={ctx} sessionID={input.sessionID} />,
-    });
+    }) : () => {};
     const removeCommand = ctx.ui.slot({
       append: "app",
       render: () => {
