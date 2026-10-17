@@ -116,11 +116,33 @@ export function selectLogged(parts: readonly Segment[], hasSrcPrefix: (id: strin
   return parts.filter((part, index) => (currentEnabled && index === parts.length - 1) || [...part.ids].some(hasSrcPrefix));
 }
 
+// UniiChat's compaction hook answers with this stub, so OpenCode skips its own summary. OpenCode still
+// records a completed compaction and starts the session's context there; UniiChat sees past stubs.
+export const STUB_SUMMARY = "UniiChat is on; native compaction is skipped.";
+export const STUB_METADATA = { uniichat: "skipped" } as const;
+
+export function isStub(row: Row): boolean {
+  if (row.type !== "compaction" || row.status !== "completed") return false;
+  // Untagged stubs predate the tag (Oct 16).
+  return row.metadata?.uniichat === STUB_METADATA.uniichat || row.summary === STUB_SUMMARY;
+}
+
+/** The current turn is cut by a real (non-stub) compaction checkpoint. */
 export function cutTurn(rows: readonly Row[]): boolean {
   for (let i = rows.length - 1; i >= 0; i--) {
     const row = rows[i]!;
     if (row.type === "idle") return false;
-    if (row.type === "compaction" && row.status === "completed") return true;
+    if (row.type === "compaction" && row.status === "completed" && !isStub(row)) return true;
+  }
+  return false;
+}
+
+/** The current turn holds a stub, so the context OpenCode loaded misses the turn's start. */
+export function stubCut(rows: readonly Row[]): boolean {
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i]!;
+    if (row.type === "idle") return false;
+    if (isStub(row)) return true;
   }
   return false;
 }

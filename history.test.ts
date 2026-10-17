@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Message } from "@opencode/ai";
 import { blocks } from "./view.ts";
-import { btwRequest, buildRequest, cutTurn, EMPTY_CATALOG, extractCatalog, extractSkills, items, segments, selectLogged, subagentReport, turnKey, type RequestMessage, type Row } from "./history.ts";
+import { btwRequest, buildRequest, cutTurn, isStub, stubCut, STUB_SUMMARY, EMPTY_CATALOG, extractCatalog, extractSkills, items, segments, selectLogged, subagentReport, turnKey, type RequestMessage, type Row } from "./history.ts";
 
 const time = { created: 1700000000000 };
 const model = { id: "claude-sonnet-4-5", providerID: "anthropic" };
@@ -45,6 +45,14 @@ describe("durable turn boundaries", () => {
     expect(cutTurn([checkpoint("running"), user("msg_new")])).toBe(false);
     expect(cutTurn([])).toBe(false);
     expect(cutTurn([{ type: "compaction", id: "msg_failed", status: "failed", reason: "auto", error: { type: "unknown", message: "failed" }, time }])).toBe(false);
+    // UniiChat's own stub, tagged or (older) recognised by its text, does not cut the turn.
+    const tagged: Row = { type: "compaction", id: "msg_stub", status: "completed", reason: "auto", summary: "x", recent: "", metadata: { uniichat: "skipped" }, time };
+    const legacy: Row = { type: "compaction", id: "msg_stub2", status: "completed", reason: "auto", summary: STUB_SUMMARY, recent: "", time };
+    expect(isStub(tagged) && isStub(legacy) && !isStub(checkpoint())).toBe(true);
+    expect(cutTurn([idle("msg_idle"), user("msg_new"), tagged])).toBe(false);
+    expect(cutTurn([idle("msg_idle"), user("msg_new"), legacy, checkpoint()])).toBe(true);
+    expect(stubCut([idle("msg_idle"), user("msg_new"), tagged, assistant([])])).toBe(true);
+    expect(stubCut([tagged, idle("msg_idle"), user("msg_new")])).toBe(false);
   });
 });
 

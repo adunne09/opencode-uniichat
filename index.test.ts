@@ -410,6 +410,42 @@ test("an undo before a compaction checkpoint is found in the full message list",
   })));
 });
 
+test("a UniiChat compaction stub mid-turn: the turn is rebuilt from the full message list", async () => {
+  const reply = (id: string, text: string): Row => ({ type: "assistant", id, content: [{ type: "text", text }], agent: "build", model: { id: "model", providerID: "anthropic" }, time: { created: 1001 } });
+  const stub: Row = { type: "compaction", id: "msg_stub", status: "completed", reason: "auto", summary: "UniiChat is on; native compaction is skipped.", recent: "task\nstep 1", metadata: { uniichat: "skipped" }, time: { created: 1002 } };
+  const f = fixture([user("msg_old"), idle("msg_idle"), user("msg_new")]);
+  await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+    yield* integrate(f.ctx, f.options);
+    yield* f.hooks.get("context")!(f.event([msg("user", "old", "msg_old"), msg("user", "task", "msg_new")]));
+    const compaction: SessionCompaction = { ...f.event() };
+    yield* f.hooks.get("compaction")!(compaction);
+    expect(compaction.result?.metadata).toEqual({ uniichat: "skipped" });
+    // OpenCode's context now starts at the stub; the full list still has the turn.
+    f.rows([stub, reply("msg_r2", "step 2")]);
+    let asked = 0;
+    f.options.older = (_sid, has) => Effect.sync(() => {
+      asked++;
+      const all = [user("msg_old"), idle("msg_idle"), user("msg_new"), reply("msg_r1", "step 1"), stub, reply("msg_r2", "step 2")];
+      const out: Row[] = [];
+      for (const row of [...all].reverse()) { out.push(row); if (has(row)) break; }
+      return out.reverse();
+    });
+    const next = f.event([Message.make({ id: "msg_stub", role: "user", content: [{ type: "text", text: "<conversation-checkpoint>" }] }), msg("assistant", "step 2", "msg_r2")]);
+    yield* f.hooks.get("context")!(next);
+    expect(asked).toBeGreaterThan(0);
+    expect(next.messages.map((message) => message.id)).toEqual(["msg_new", "msg_r1", "msg_r2"]);
+    const texts = next.messages.map((message) => message.content.flatMap((part) => part.type === "text" ? [part.text] : []));
+    expect(texts[0]!.at(-1)).toBe("task");
+    expect(texts[0]![0]).toContain("0+1|old");
+    expect(texts.flat().some((text) => text.includes("conversation-checkpoint"))).toBe(false);
+    // Unreachable full list: no throw, the request starts at the stub's checkpoint.
+    f.options.older = () => Effect.succeed(undefined);
+    const fallback = f.event([Message.make({ id: "msg_stub", role: "user", content: [{ type: "text", text: "<conversation-checkpoint>" }] }), msg("assistant", "step 2", "msg_r2")]);
+    yield* f.hooks.get("context")!(fallback);
+    expect(fallback.messages[0]!.id).toBe("msg_stub");
+  })));
+});
+
 test("/btw gets Unii's prompt and memory instead of the whole session; off or child stays vanilla", async () => {
   const f = fixture([user("msg_old"), idle("msg_idle"), user("msg_new")]);
   await Effect.runPromise(Effect.scoped(Effect.gen(function* () {

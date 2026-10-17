@@ -13,6 +13,7 @@ import * as anthropic from "./anthropic.ts";
 import * as env from "./env.ts";
 import * as history from "./history.ts";
 import * as turn from "./turn.ts";
+import { toMessages } from "./messages.ts";
 import { chatDir } from "./store.ts";
 import { BTW_LOOKUP_NOTE, btwMemory, SUBAGENT_NOTE, SYSTEM_PROMPT, systemText, stateText, ZOOM_DESCRIPTION, DATE_DESCRIPTION } from "./prompts.ts";
 import { UniiChatRpc, statusValue } from "./rpc.ts";
@@ -78,6 +79,17 @@ function older(sessionID: string, has: (row: history.Row) => boolean) {
   });
 }
 
+/**
+ * The request for a turn read past a stub: the turn's rows before the latest stub, rebuilt as OpenCode
+ * would send them, then OpenCode's own messages from the stub on, without the stub's checkpoint message.
+ */
+export function restoreTurn(rows: readonly history.Row[], messages: readonly Message[], model: { providerID: string; id: string; variant?: string }): Message[] {
+  const at = rows.findLastIndex(history.isStub);
+  const stubs = new Set(rows.filter(history.isStub).map((row) => row.id));
+  const before = toMessages(rows.slice(0, at).filter((row) => row.type !== "compaction"), model);
+  return [...before, ...messages.filter((message) => message.id === undefined || !stubs.has(message.id))];
+}
+
 export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {}) => Effect.gen(function* () {
   const compactor = yield* Layer.build(anthropic.layer());
   const deps: engine.Deps = {
@@ -104,6 +116,18 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
   const readHistory = (sessionID: string) => ctx.session.context({ sessionID: id(sessionID) }).pipe(
     Effect.map((rows) => rows.map((row) => Schema.encodeSync(SessionMessage.Info)(row))),
   );
+  // A UniiChat stub compaction inside the current turn makes OpenCode's context start at the stub,
+  // so the turn's start is missing. Read the turn from its opening idle on, from the full list.
+  // `rebuilt` is false when the full list is unreachable; then only the latest context is known.
+  const turnHistory = Effect.fn(function* (sessionID: string) {
+    const rows = yield* readHistory(sessionID);
+    if (!history.stubCut(rows)) return { rows, rebuilt: false };
+    const full = yield* (options.older ?? older)(sessionID, (row) => row.type === "idle").pipe(
+      Effect.catchCause((cause) => Effect.logWarning("UniiChat could not read the turn behind a compaction stub", cause).pipe(Effect.as(undefined))),
+    );
+    if (!full || !rows.every((row) => full.some((other) => other.id === row.id))) return { rows, rebuilt: false };
+    return { rows: full, rebuilt: true };
+  });
   const parent = Effect.fn(function* (sessionID: string) {
     if (!parents.has(sessionID)) parents.set(sessionID, (yield* ctx.session.get({ sessionID: id(sessionID) })).parentID);
     return parents.get(sessionID);
@@ -226,7 +250,7 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
       removeTools();
       return;
     }
-    const rows = yield* readHistory(sessionID);
+    const { rows, rebuilt } = child ? { rows: yield* readHistory(sessionID), rebuilt: false } : yield* turnHistory(sessionID);
     const decision = turn.begin(history.turnKey(rows), child ? { on: true } : switchState, memos.get(sessionID));
     const memo = decision.memo;
     memos.set(sessionID, memo);
@@ -269,8 +293,9 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
     const reports = new Map(history.items(current.rows, { name: (childID) => nameFor(chat, current.rows, childID) })
       .filter((item) => item.kind === "work").map((item) => [item.src, item.text]));
     const perTurnState = child ? undefined : stateText(yield* env.stateInput(location));
+    const messages = rebuilt ? restoreTurn(rows, event.messages, event.model) : event.messages;
     event.messages = (yield* Effect.try({
-      try: () => history.buildRequest({ messages: event.messages, turnIds: current.ids, view: memo.frozen!, reports, child, state: perTurnState }),
+      try: () => history.buildRequest({ messages, turnIds: current.ids, view: memo.frozen!, reports, child, state: perTurnState }),
       catch: error,
     })).map((message) => Message.make(message));
   })).pipe(Effect.orDie));
@@ -303,7 +328,7 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
   yield* ctx.session.hook("generate", (event) => Effect.gen(function* () {
     const sessionID = event.sessionID;
     if ((yield* parent(sessionID)) !== undefined || !(yield* isEnabled(sessionID))) return;
-    const rows = yield* readHistory(sessionID);
+    const { rows, rebuilt } = yield* turnHistory(sessionID);
     const memo = memos.get(sessionID);
     // A running turn keeps the mode it started in; otherwise the switch decides, as the next turn would.
     if (!(memo?.key === history.turnKey(rows) ? memo.enabled : (yield* state(sessionID)).on)) return;
@@ -315,7 +340,8 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
     const view = current.rows.length > 0 && memo?.key === history.turnKey(rows) && memo.frozen ? memo.frozen : chat.renderView();
     const reports = new Map(history.items(current.rows, { name: (childID) => nameFor(chat, current.rows, childID) })
       .filter((item) => item.kind === "work").map((item) => [item.src, item.text]));
-    const build = (extra?: string) => history.btwRequest({ messages: event.messages, turnIds: current.ids, view, reports, extra }).map((message) => Message.make(message));
+    const raw = rebuilt ? restoreTurn(rows, event.messages, event.model) : event.messages;
+    const build = (extra?: string) => history.btwRequest({ messages: raw, turnIds: current.ids, view, reports, extra }).map((message) => Message.make(message));
     const opened = event.model.providerID === "anthropic"
       ? yield* lookup(chat, { modelID: event.model.id, system, tools: event.tools, messages: build(BTW_LOOKUP_NOTE) }).pipe(
         Effect.catchCause((cause) => Effect.logWarning("UniiChat /btw memory lookup failed; answering from the view", cause).pipe(Effect.as([]))),
@@ -326,7 +352,7 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
   }).pipe(Effect.orDie));
 
   yield* ctx.session.hook("compaction", Effect.fn(function* (event) {
-    if (!(yield* parent(event.sessionID)) && (yield* isEnabled(event.sessionID))) event.result = { summary: "UniiChat is on; native compaction is skipped." };
+    if (!(yield* parent(event.sessionID)) && (yield* isEnabled(event.sessionID))) event.result = { summary: history.STUB_SUMMARY, metadata: { ...history.STUB_METADATA } };
   }, Effect.orDie));
   yield* ctx.tool.hook("execute.before", Effect.fn(function* (event) {
     if (event.tool !== "subagent") return;
