@@ -59,9 +59,9 @@ They go in the plugin's `options` object. The defaults are the recipe's values.
 | --- | --- | --- |
 | `defaultOn` | `false` | Sessions never switched on or off start with UniiChat on. |
 | `compaction.model` | newest `anthropic/claude-haiku-*` | Compaction model, as `"providerID/modelID"`. |
-| `compaction.variant` | none | A model variant, as OpenCode names them (e.g. `"high"`). |
+| `compaction.variant` | `"high"` | Model variant, as OpenCode names them. |
 | `compaction.maxTokens` | `32000` | Output limit for one compaction call. |
-| `compaction.providerOptions` | Anthropic: `{ "thinking": { "type": "adaptive", "display": "summarized" }, "effort": "high" }`; otherwise `{}` | Provider options sent with each compaction call. Setting it (or `variant`) replaces the Anthropic default. |
+| `compaction.providerOptions` | `{}` | Extra provider options sent with each compaction call. |
 | `compaction.timeoutMs` | `240000` | A call with no answer by then fails, and is retried. |
 | `compaction.tries` | `5` | Tries per node in the recipe's "Too long" loop. |
 | `compaction.concurrency` | `8` | Compaction calls in flight at once. |

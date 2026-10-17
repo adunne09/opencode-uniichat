@@ -11,7 +11,7 @@ describe("options", () => {
   test("defaults follow the recipe and today's behavior", () => {
     const options = parse(undefined);
     expect(options.defaultOn).toBe(false);
-    expect(options.compaction).toEqual({ maxTokens: 32000, timeoutMs: 240000, tries: 5, concurrency: 8 });
+    expect(options.compaction).toEqual({ variant: "high", maxTokens: 32000, timeoutMs: 240000, tries: 5, concurrency: 8 });
     expect(options.view).toEqual({ chat: { high: 128000, low: 64000 }, compaction: { high: 32000, low: 16000 } });
     expect(options.btw).toEqual({ lookupSteps: 8, maxTokens: 4000 });
     expect(options.prompts.system).toBe(SYSTEM_PROMPT);

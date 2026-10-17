@@ -17,14 +17,11 @@ export const Schema = z.object({
   compaction: z.object({
     /** "providerID/modelID". Default: the newest Anthropic Claude Haiku that OpenCode lists. */
     model: z.string().regex(/^[^/]+\/.+$/, "use providerID/modelID").optional(),
-    /** A model variant as OpenCode names them (e.g. "high"). */
-    variant: z.string().optional(),
+    /** A model variant as OpenCode names them. */
+    variant: z.string().default("high"),
     /** Output token limit for one compaction call. */
     maxTokens: positive.default(32000),
-    /**
-     * Provider options sent with each compaction call. Default for Anthropic models:
-     * adaptive thinking at "high" effort; none for other providers.
-     */
+    /** Extra provider options sent with each compaction call. */
     providerOptions: z.record(z.string(), z.unknown()).optional(),
     /** A call that has not answered by then fails and is retried. */
     timeoutMs: positive.default(4 * 60_000),
@@ -74,8 +71,6 @@ export function modelRef(spec: string, variant?: string) {
   const at = spec.indexOf("/");
   return { providerID: spec.slice(0, at), id: spec.slice(at + 1), ...(variant ? { variant } : {}) };
 }
-
-export const ANTHROPIC_DEFAULTS = { thinking: { type: "adaptive", display: "summarized" }, effort: "high" } as const;
 
 /** Applies the process-wide settings that the recipe's engine reads. */
 export function configure(options: Options) {

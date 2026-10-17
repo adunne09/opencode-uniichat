@@ -112,8 +112,7 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
   const depsFor = (sessionID: string): engine.Deps => ({
     compact: (input) => Effect.gen(function* () {
       const model = yield* compactionModel;
-      const providerOptions = settings.compaction.providerOptions
-        ?? (model.providerID === "anthropic" && !model.variant ? config.ANTHROPIC_DEFAULTS : {});
+      const providerOptions = settings.compaction.providerOptions ?? {};
       return yield* compactor.generate(transport, {
         ...input, parentID: sessionID, model,
         options: { maxTokens: settings.compaction.maxTokens, ...structuredClone(providerOptions) },
