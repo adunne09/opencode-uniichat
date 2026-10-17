@@ -1,0 +1,57 @@
+{
+  "name": "opencode-uniichat",
+  "version": "0.1.0",
+  "description": "UniiChat for OpenCode v2: a compacted, tree-structured memory in place of the growing transcript, after Victor Taelin's UniiChat recipe.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maxandron/opencode-uniichat.git"
+  },
+  "keywords": ["opencode", "opencode-plugin", "memory", "compaction"],
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/index.ts",
+    "./tui": "./dist/tui.js",
+    "./rpc": "./src/rpc.ts"
+  },
+  "oc-plugin": ["server", "tui"],
+  "files": [
+    "src/*.ts",
+    "src/*.tsx",
+    "!src/*.test.ts",
+    "dist/tui.js",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "bun scripts/build-tui.ts",
+    "check": "tsc --noEmit -p tsconfig.json && bun scripts/build-tui.ts --check",
+    "test": "bun test src"
+  },
+  "dependencies": {
+    "@opencode/ai": "^2.0.32",
+    "@opencode/client": "^2.0.32",
+    "@opencode/schema": "^2.0.32",
+    "@opencode/util": "^2.0.32",
+    "zod": "^4.0.0"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": "^2.0.32",
+    "effect": "^4.0.1"
+  },
+  "peerDependenciesMeta": {
+    "@opencode/plugin": { "optional": true },
+    "effect": { "optional": true }
+  },
+  "devDependencies": {
+    "@opencode/plugin": "2.0.32",
+    "@opentui/core": "0.6.4",
+    "@opentui/solid": "0.6.4",
+    "@types/bun": "^1.4.0",
+    "@types/node": "^24.12.2",
+    "effect": "4.0.1",
+    "solid-js": "1.9.12",
+    "typescript": "^5.8.2"
+  }
+}
