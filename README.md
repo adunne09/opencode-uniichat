@@ -115,7 +115,7 @@ These are additions the recipe does not cover:
 bun install
 bun test src          # unit tests, including a check that dist/tui.js is current
 bun run check         # type check + dist/tui.js staleness
-bun run build         # rebuild dist/tui.js after changing src/tui.tsx or src/rpc.ts
+bun run build:tui       # rebuild dist/tui.js after changing src/tui.tsx or src/rpc.ts
 ```
 
 For local development, point both configs at the checkout's `src/` directory, e.g. `"plugins": ["/path/to/opencode-uniichat/src"]`. Local plugins hot-reload, and the TUI loads from `src/tui.tsx` directly. Installed copies load `dist/tui.js`, because OpenCode does not compile `.tsx` under `node_modules`. So commit a rebuilt `dist/tui.js` with every TUI change.
