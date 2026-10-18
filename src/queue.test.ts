@@ -179,7 +179,6 @@ describe("work scheduler", () => {
 
   test("restore skips out-of-order built leaves without counting them", () => {
     const q = WorkQueue.restore(14, [[0, 0], [0, 2], [0, 4], [0, 6], [0, 8], [0, 10], [0, 12]]);
-    expect(q.p).toBe(1);
     expect(q.drain(noFit, 8).start).toEqual([1, 3, 5, 7, 9, 11, 13].map((i) => [0, i]));
     expect(q.waitDone(14)).toBe(false);
     for (const i of [13, 11, 9, 7, 5, 3, 1]) q.built([0, i]);

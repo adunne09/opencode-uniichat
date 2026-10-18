@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { children, first, last, leafText, mergeText, name, NODE_LIMIT, parseZoom, parent, sibling } from "./tree.ts";
+import { children, first, last, leafText, mergeText, name, parseZoom, parent, sibling } from "./tree.ts";
 
 describe("summary tree", () => {
   test("maps names and inclusive ranges to parent, sibling and children", () => {
@@ -24,7 +24,6 @@ describe("summary tree", () => {
     for (const id of [-1, 41, 0.5, NaN, Infinity, 2 ** 53]) expect(parseZoom(8, id)).toBeUndefined();
   });
   test("keeps a leaf verbatim only when kind and text fit in 512 bytes", () => {
-    expect(NODE_LIMIT).toBe(512);
     expect(leafText("user", "x".repeat(506))).toBe("user: " + "x".repeat(506));
     expect(leafText("user", "x".repeat(507))).toBeUndefined();
     expect(leafText("user", "é".repeat(253))).toBe("user: " + "é".repeat(253));

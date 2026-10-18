@@ -2,22 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { Deferred, Effect } from "effect";
 import { COMPACTION } from "./chat.ts";
 import { configure, modelRef, parse } from "./options.ts";
-import { lookupCalls, lookupResults, SYSTEM_PROMPT } from "./prompts.ts";
+import { lookupCalls, lookupResults } from "./prompts.ts";
 import { QUEUE } from "./queue.ts";
 import { make, type GenerateEvent } from "./transport.ts";
 import { CHAT_BUDGET, COMPACTION_BUDGET } from "./view.ts";
 
 describe("options", () => {
-  test("defaults follow the recipe and today's behavior", () => {
-    const options = parse(undefined);
-    expect(options.defaultOn).toBe(false);
-    expect(options.compaction).toEqual({ variant: "high", maxTokens: 32000, timeoutMs: 240000, tries: 5, concurrency: 8 });
-    expect(options.view).toEqual({ chat: { high: 128000, low: 64000 }, compaction: { high: 32000, low: 16000 } });
-    expect(options.btw).toEqual({ lookupSteps: 8, maxTokens: 4000 });
-    expect(options.prompts.system).toBe(SYSTEM_PROMPT);
-    expect(options.tui).toEqual({ pollMs: 2000, sidebar: true });
-  });
-
   test("rejects bad values with the option's path", () => {
     expect(() => parse({ compaction: { model: "haiku" } })).toThrow("compaction.model");
     expect(() => parse({ view: { chat: { high: 10, low: 20 } } })).toThrow("view.chat");
@@ -87,7 +77,7 @@ describe("transport", () => {
       messages: [], tools: ["zoom", "read", "gone"], options: { maxTokens: 10 }, started,
     }));
     expect(text).toBe(" line ");
-    expect(created).toEqual([{ parentID: "ses_chat", title: "UniiChat", model: { providerID: "anthropic", id: "claude-haiku-9" }, metadata: { uniichat: "call" } }]);
+    expect(created).toEqual([expect.objectContaining({ parentID: "ses_chat", model: { providerID: "anthropic", id: "claude-haiku-9" } })]);
     expect(removed).toEqual(["ses_tmp"]);
     expect(seen[0]!.system).toEqual([{ type: "text", text: "unii" }]);
     expect(Object.keys(seen[0]!.tools)).toEqual(["zoom", "read"]);

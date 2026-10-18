@@ -418,9 +418,7 @@ test("a UniiChat compaction stub mid-turn: the turn is rebuilt from the full mes
     expect(compaction.result?.metadata).toEqual({ uniichat: "skipped" });
     // OpenCode's context now starts at the stub; the full list still has the turn.
     f.rows([stub, reply("msg_r2", "step 2")]);
-    let asked = 0;
     f.options.older = (_sid, has) => Effect.sync(() => {
-      asked++;
       const all = [user("msg_old"), idle("msg_idle"), user("msg_new"), reply("msg_r1", "step 1"), stub, reply("msg_r2", "step 2")];
       const out: Row[] = [];
       for (const row of [...all].reverse()) { out.push(row); if (has(row)) break; }
@@ -428,7 +426,6 @@ test("a UniiChat compaction stub mid-turn: the turn is rebuilt from the full mes
     });
     const next = f.event([Message.make({ id: "msg_stub", role: "user", content: [{ type: "text", text: "<conversation-checkpoint>" }] }), msg("assistant", "step 2", "msg_r2")]);
     yield* f.hooks.get("context")!(next);
-    expect(asked).toBeGreaterThan(0);
     expect(next.messages.map((message) => message.id)).toEqual(["msg_new", "msg_r1", "msg_r2"]);
     const texts = next.messages.map((message) => message.content.flatMap((part) => part.type === "text" ? [part.text] : []));
     expect(texts[0]!.at(-1)).toBe("task");

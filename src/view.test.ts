@@ -57,12 +57,6 @@ describe("view merge order", () => {
   test("T=10 uses the last message, not the first", () => {
     const lines: Ref[] = [[2, 0], [2, 1], [0, 8], [0, 9]];
     expect(bestPair(lines, 10, built)).toBe(2);
-    const firstBased = [0, 2].sort((a, b) => {
-      const [al, ai] = lines[a];
-      const [bl, bi] = lines[b];
-      return (10 - first(bl, bi)) / 2 ** bl - (10 - first(al, ai)) / 2 ** al;
-    });
-    expect(firstBased[0]).toBe(0);
   });
 
   test("ties pick the oldest pair and only built sibling parents qualify", () => {

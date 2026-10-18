@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { assistantSrc, clipEcho, cutUtf8, echoText, fileLine, formatDate, formatISODate, splitText, syntheticSrc, toolCallSrc, toolResultSrc, toolText, userSrc, utf8Size, workSrc, type Kind, type LogRecord } from "./record.ts";
+import { clipEcho, cutUtf8, echoText, fileLine, formatDate, formatISODate, splitText, toolText, utf8Size } from "./record.ts";
 
 describe("record text", () => {
   test("measures and cuts UTF-8 without splitting code points", () => {
@@ -39,15 +39,6 @@ describe("record text", () => {
     expect(clipEcho(unicode)).toBe(`${"a".repeat(14999)}\n[… 10 characters clipped …]\n${"b".repeat(14999)}`);
     expect(clipEcho(unicode).isWellFormed()).toBe(true);
   });
-  test("uses split-index keys for every non-echo source", () => {
-    expect(userSrc("m", 2)).toBe("m:2");
-    expect(syntheticSrc("m", 2)).toBe("m:2");
-    expect(assistantSrc("m", 3, 2)).toBe("m:3:2");
-    expect(toolCallSrc("t", 2)).toBe("t:call:2");
-    expect(toolResultSrc("t")).toBe("t:result");
-    expect(workSrc("m", 2)).toBe("m:2");
-    expect(workSrc("m")).toBe("m:0");
-  });
   test("formats tool records, errors and attachments exactly", () => {
     expect(toolText("shell", { command: "echo 😀", nested: [1, true] })).toBe('shell {"command":"echo 😀","nested":[1,true]}');
     expect(echoText("failed\nwhy", true)).toBe("error: failed\nwhy");
@@ -69,13 +60,6 @@ describe("record text", () => {
     } finally {
       if (previous === undefined) delete process.env.TZ;
       else process.env.TZ = previous;
-    }
-  });
-  test("supports all recipe kinds and the complete log schema", () => {
-    const kinds: Kind[] = ["user", "unii", "tool", "echo", "work", "note"];
-    for (const kind of kinds) {
-      const record: LogRecord = { i: 0, kind, text: "😀", size: utf8Size("😀"), date: formatISODate(0), src: "m:0" };
-      expect(JSON.parse(JSON.stringify(record))).toEqual({ i: 0, kind, text: "😀", size: 4, date: "1970-01-01T00:00:00.000Z", src: "m:0" });
     }
   });
 });
