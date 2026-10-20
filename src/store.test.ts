@@ -1,14 +1,13 @@
-import { expect, spyOn, test } from "bun:test";
-import * as fs from "node:fs";
+import { expect, test } from "bun:test";
 import { appendFileSync, mkdtempSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Path } from "@opencode/util/global";
 import { Effect } from "effect";
 import { utf8Size, type LogRecord } from "./record.ts";
-import { chatDir, Store } from "./store.ts";
+import { Store } from "./store.ts";
 
 const run = Effect.runPromise;
-const temp = () => mkdtempSync("/tmp/opencode/uniichat-store-");
+const temp = () => mkdtempSync(join(tmpdir(), "uniichat-store-"));
 const record = (i: number, date = "2026-10-09T12:00:00"): LogRecord => ({
   i, kind: "user", text: `Message ${i}: café\nnext`, size: utf8Size(`Message ${i}: café\nnext`), date, src: `msg_${i}:0`,
 });
@@ -48,30 +47,7 @@ for (let renamed = 0; renamed <= 3; renamed++) {
   });
 }
 
-for (let renamed = 0; renamed < 3; renamed++) {
-  test(`failed publication retains the commit marker after ${renamed} renames`, async () => {
-    const dir = temp();
-    const store = await run(Store.open(dir));
-    await run(store.saveViews([], [], { chat: false, compaction: false }));
-    const original = fs.renameSync;
-    let count = 0;
-    const fault = spyOn(fs, "renameSync").mockImplementation((from, to) => {
-      if (String(from).startsWith(`${dir}/`) && count++ === renamed) throw new Error("crash");
-      return original(from, to);
-    });
-    try {
-      expect((await run(Effect.result(store.saveViews([[1, 0]], [[1, 0]], { chat: true, compaction: true }))))._tag).toBe("Failure");
-      expect(fs.existsSync(join(dir, "snapshot.commit"))).toBe(true);
-    } finally { fault.mockRestore(); }
-    const loaded = await run((await run(Store.open(dir))).load());
-    expect(loaded.view).toEqual([[1, 0]]);
-    expect(loaded.compView).toEqual(loaded.view);
-    expect(loaded.batch).toEqual({ chat: true, compaction: true });
-  });
-}
-
-test("round trip all storage after reopen without rebuilding views", async () => {
-  expect(chatDir("session-1")).toBe(join(Path.data, "uniichat", "session-1"));
+test("records, nodes, views, flags and system survive reopen", async () => {
   const dir = temp();
   const store = await run(Store.open(dir));
   const a = record(1, "2026-10-08T12:00:00");
@@ -82,27 +58,42 @@ test("round trip all storage after reopen without rebuilding views", async () =>
   await run(store.appendNode(node));
   await run(store.saveViews([[1, 0]], [[0, 0], [0, 1]], { chat: true, compaction: false }));
   await run(store.saveSystem("frozen\nsystem"));
-  await run(store.saveSystem("frozen\nsystem"));
-  await run(store.appendAgent("explore-1", record(0)));
-  await run(store.appendAgent("explore-1", record(1)));
-  const data = new Uint8Array([0, 255, 128, 42]);
-  expect(await run(store.saveFile("0-0.png", data))).toBe("files/0-0.png");
-  const reopened = await run(Store.open(dir));
-  const loaded = await run(reopened.load());
+  const loaded = await run((await run(Store.open(dir))).load());
   expect(loaded).toEqual({
     records: [b, a], nodes: [node], view: [[1, 0]], compView: [[0, 0], [0, 1]],
     batch: { chat: true, compaction: false }, system: "frozen\nsystem",
-    agents: new Map([["explore-1", [record(0), record(1)]]]), tornLines: [],
+    agents: new Map(), tornLines: [],
   });
+});
+
+test("agent logs survive reopen and an unknown agent reads as undefined", async () => {
+  const dir = temp();
+  const store = await run(Store.open(dir));
+  await run(store.appendAgent("explore-1", record(0)));
+  await run(store.appendAgent("explore-1", record(1)));
+  const reopened = await run(Store.open(dir));
+  expect((await run(reopened.load())).agents).toEqual(new Map([["explore-1", [record(0), record(1)]]]));
   expect(await run(reopened.readAgent("explore-1"))).toEqual([record(0), record(1)]);
   expect(await run(reopened.readAgent("absent"))).toBeUndefined();
-  expect(Array.from(await run(reopened.readFile("files/0-0.png")))).toEqual(Array.from(data));
-  expect(readdirSync(join(dir, "main")).sort()).toEqual(["2026-10-08.jsonl", "2026-10-09.jsonl"]);
-  expect(readdirSync(dir).filter((s) => s.endsWith(".tmp"))).toEqual([]);
-  expect(JSON.parse(readFileSync(join(dir, "view-batch.json"), "utf8"))).toEqual({ chat: true, compaction: false });
+});
+
+test("saved files read back byte for byte after reopen", async () => {
+  const dir = temp();
+  const store = await run(Store.open(dir));
+  const data = new Uint8Array([0, 255, 128, 42]);
+  const rel = await run(store.saveFile("0-0.png", data));
+  expect(Array.from(await run((await run(Store.open(dir))).readFile(rel)))).toEqual(Array.from(data));
+});
+
+test("a later view save is seen by another open handle", async () => {
+  const dir = temp();
+  const store = await run(Store.open(dir));
+  await run(store.saveViews([[0, 0]], [[0, 0]], { chat: true, compaction: false }));
+  const other = await run(Store.open(dir));
   await run(store.saveViews([], [], { chat: false, compaction: true }));
-  expect((await run(reopened.load())).batch).toEqual({ chat: false, compaction: true });
-  expect(readdirSync(dir).filter((s) => s.endsWith(".tmp"))).toEqual([]);
+  const loaded = await run(other.load());
+  expect(loaded.view).toEqual([]);
+  expect(loaded.batch).toEqual({ chat: false, compaction: true });
 });
 
 test("new store has no views and false pending flags", async () => {

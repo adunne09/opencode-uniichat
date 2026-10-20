@@ -10,6 +10,8 @@ import type { Row, Item } from "./history.ts";
 import { blocks } from "./view.ts";
 import { SUBAGENT_NOTE, SYSTEM_PROMPT } from "./prompts.ts";
 import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Chat } from "./chat.ts";
 import { UniiChatRpc } from "./rpc.ts";
 
@@ -307,7 +309,7 @@ for (const state of ["fresh", "compacted", "failed"] as const) {
   test(`all RPC outputs are JSON values with a ${state} chat`, async () => {
     const f = fixture([]);
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
-      const chat = yield* Chat.open(mkdtempSync("/tmp/opencode/uniichat-rpc-"), {
+      const chat = yield* Chat.open(mkdtempSync(join(tmpdir(), "uniichat-rpc-")), {
         compact: () => state === "failed" ? Effect.fail("compaction failed") : Effect.succeed({
           text: "summary", ms: 7,
         }),

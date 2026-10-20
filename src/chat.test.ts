@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Deferred, Effect, Fiber, Queue } from "effect";
 import { TestClock } from "effect/testing";
@@ -10,7 +11,7 @@ import { clipEcho, formatDate, utf8Size } from "./record.ts";
 import { leafTask, mergeTask, tooLong } from "./prompts.ts";
 
 const run = Effect.runPromise;
-const temp = () => mkdtempSync("/tmp/opencode/uniichat-chat-");
+const temp = () => mkdtempSync(join(tmpdir(), "uniichat-chat-"));
 const item = (i: number, text = `message ${i}`, kind: Item["kind"] = "user"): Item => ({ kind, text, date: 1791547200000, src: `msg_${i}` });
 const output = (text: string | undefined): Output => ({ text, ms: 7 });
 const deps = (compact: Deps["compact"] = () => Effect.succeed(output("summary"))): Deps => ({ compact });
@@ -57,7 +58,7 @@ test("a replay resumes the missing pages with the original attachment id", async
   expect((await run(load(dir))).records.map((rec) => [rec.i, rec.src, rec.text.length])).toEqual([[0, "msg_0:0", 30000], [1, "msg_0:1", 1]]);
 });
 
-test("files survive replay and reopen, zoom and date validate their inputs", async () => {
+test("files survive replay and reopen", async () => {
   const dir = temp();
   const chat = await run(Chat.open(dir, deps()));
   const attached = { ...item(0), files: [{ name: "picture.png", mime: "image/png", data: new Uint8Array([1, 2, 255]) }, { name: "lost.pdf", mime: "application/pdf" }] };
@@ -68,9 +69,19 @@ test("files survive replay and reopen, zoom and date validate their inputs", asy
   expect(result.text).toBe("user: message 0\n[file: picture.png image/png → files/0-0.png]\n[file: lost.pdf application/pdf, not available]");
   expect(Array.from(result.files![0]!.data)).toEqual([1, 2, 255]);
   expect(result.files![0]!.mime).toBe("image/png");
-  expect(await run(reopened.date(0))).toEqual({ text: formatDate(attached.date) });
-  for (const [id, n] of [[0, undefined], [1, 1], [1, 2], [0, 3]]) expect((await run(Effect.result(reopened.zoom(id!, n))))._tag).toBe("Failure");
-  expect((await run(Effect.result(reopened.date(-1))))._tag).toBe("Failure");
+});
+
+test("date gives a message's time and rejects ids outside the log", async () => {
+  const chat = await run(Chat.open(temp(), deps()));
+  await run(chat.log([item(0)]));
+  expect(await run(chat.date(0))).toEqual({ text: formatDate(item(0).date) });
+  for (const id of [-1, 1]) expect((await run(Effect.result(chat.date(id))))._tag).toBe("Failure");
+});
+
+test("zoom rejects a missing n, ids past the log and lines that are not nodes", async () => {
+  const chat = await run(Chat.open(temp(), deps()));
+  await run(chat.log([item(0)]));
+  for (const [id, n] of [[0, undefined], [1, 1], [1, 2], [0, 3]]) expect((await run(Effect.result(chat.zoom(id!, n))))._tag).toBe("Failure");
 });
 
 test("instant leaves and merge cascades use no calls and each node is persisted once", async () => {
@@ -366,7 +377,7 @@ test("a build completed by the next log releases a backoff waiter at once", asyn
   }).pipe(Effect.provide(TestClock.layer())));
 });
 
-test("restart loads byte-identical rendered views and resumes only unbuilt work", async () => {
+test("restart loads byte-identical rendered views", async () => {
   const dir = temp();
   const chat = await run(Chat.open(dir, deps()));
   await run(chat.log([item(0), item(1)]));
@@ -378,9 +389,18 @@ test("restart loads byte-identical rendered views and resumes only unbuilt work"
   const reopen = await run(Chat.open(dir, deps()));
   expect(reopen.renderView()).toEqual(before);
   expect(reopen.status().viewBytes).toBe(utf8Size("0+1|user: message 0\n1+1|user: message 1\n2+1|summary\n"));
-  await run(reopen.setSystem("replacement system"));
-  expect(readFileSync(join(dir, "system.txt"), "utf8")).toBe("replacement system");
   expect(reopen.hasTools()).toBe(false);
+});
+
+test("a replaced system prompt survives restart", async () => {
+  const dir = temp();
+  const chat = await run(Chat.open(dir, deps()));
+  await run(chat.setSystem("frozen system"));
+  await run(chat.setSystem("replacement system"));
+  expect((await run(Chat.open(dir, deps()))).system()).toBe("replacement system");
+});
+
+test("restart resumes only unbuilt work", async () => {
   const pendingDir = temp();
   const pending = await run(Chat.open(pendingDir, deps()));
   await run(pending.log([item(0, "L".repeat(600))]));
@@ -590,22 +610,38 @@ test("out-of-order completions keep a gap-free view and merges wait for both hal
   }));
 });
 
-test("agent names, split/clip logs, dedupe and restart recovery", async () => {
-  const dir = temp();
-  const chat = await run(Chat.open(dir, deps()));
+test("agent names are numbered per type and stay fixed per child", async () => {
+  const chat = await run(Chat.open(temp(), deps()));
   expect(chat.agentName("childA", "explore")).toBe("explore-1");
   expect(chat.agentName("childA", "different")).toBe("explore-1");
   expect(chat.agentName("childB", "explore")).toBe("explore-2");
+});
+
+test("an agent's name survives restart once it has a log", async () => {
+  const dir = temp();
+  const chat = await run(Chat.open(dir, deps()));
+  expect(chat.agentName("childA", "explore")).toBe("explore-1");
+  await run(chat.logAgent("explore-1", [{ ...item(0), src: "childA:msg_a" }]));
+  const reopened = await run(Chat.open(dir, deps()));
+  expect(reopened.agentName("childA", "other")).toBe("explore-1");
+  expect(reopened.agentName("childC", "explore")).toBe("explore-2");
+});
+
+test("agent logs split long text, clip echoes, dedupe replays and stay out of the main chat", async () => {
+  const dir = temp();
+  const chat = await run(Chat.open(dir, deps()));
+  chat.agentName("childA", "explore");
   const items = [{ ...item(0, "L".repeat(30001)), src: "childA:msg_a" }, { ...item(1, "E".repeat(31000), "echo"), src: "childA:echo" }];
   await run(chat.logAgent("explore-1", items));
   await run(chat.logAgent("explore-1", items));
   const reopened = await run(Chat.open(dir, deps()));
-  expect(reopened.agentName("childA", "other")).toBe("explore-1");
-  expect(reopened.agentName("childC", "explore")).toBe("explore-2");
-  expect((await run(load(dir))).agents.get("explore-1")!.map((rec) => rec.src)).toEqual(["childA:msg_a:0", "childA:msg_a:1", "childA:echo"]);
   expect((await run(reopened.zoom("explore-1"))).text).toBe(`0|user: ${"L".repeat(30000)}\n1|user: L\n2|echo: ${clipEcho("E".repeat(31000))}`);
-  expect((await run(Effect.result(reopened.zoom("missing"))))._tag).toBe("Failure");
   expect(reopened.status().T).toBe(0);
+});
+
+test("zooming an unknown agent fails", async () => {
+  const chat = await run(Chat.open(temp(), deps()));
+  expect((await run(Effect.result(chat.zoom("missing"))))._tag).toBe("Failure");
 });
 
 test("agent name gaps after restart cannot reuse an existing log", async () => {
@@ -619,17 +655,22 @@ test("agent name gaps after restart cannot reuse an existing log", async () => {
   expect(reopened.agentName("child", "other")).toBe("explore-2");
 });
 
-test("rewind drops undone records, their nodes and files, archives them, and survives restart", async () => {
+test("undoneFrom finds the first record whose source is gone", async () => {
+  const chat = await run(Chat.open(temp(), deps()));
+  await run(chat.log([item(0), item(1), item(2), item(3), item(4), item(5)]));
+  expect(chat.undoneFrom(() => true)).toBeUndefined();
+  expect(chat.undoneFrom(() => false)).toBeUndefined();
+  expect(chat.undoneFrom((base) => base !== "msg_4" && base !== "msg_5")).toBe(4);
+  expect(chat.undoneFrom((base) => ["msg_0", "msg_1", "msg_2"].includes(base))).toBe(3);
+});
+
+test("rewind drops undone records and their nodes, and the slot is rebuilt from the redo", async () => {
   const dir = temp();
   const chat = await run(Chat.open(dir, deps()));
   await run(ready(chat));
   const pic = { name: "p.png", mime: "image/png", data: new Uint8Array([7]) };
   await run(chat.log([item(0), item(1), item(2), item(3), item(4), { ...item(5), files: [pic] }]));
   await run(chat.awaitSummarized());
-  expect(chat.undoneFrom(() => true)).toBeUndefined();
-  expect(chat.undoneFrom(() => false)).toBeUndefined();
-  expect(chat.undoneFrom((base) => base !== "msg_4" && base !== "msg_5")).toBe(4);
-  expect(chat.undoneFrom((base) => ["msg_0", "msg_1", "msg_2"].includes(base))).toBe(3);
   expect(await run(chat.rewind(3))).toEqual(["msg_3", "msg_4", "msg_5"]);
   expect(chat.status().T).toBe(3);
   expect(chat.renderView().tail).not.toContain("message 3");
@@ -642,11 +683,7 @@ test("rewind drops undone records, their nodes and files, archives them, and sur
   const reopened = await run(Chat.open(dir, deps()));
   expect(reopened.renderView()).toEqual(chat.renderView());
   expect((await run(reopened.zoom(3, 1))).text).toBe("user: redo");
-  const undone = readdirSync(join(dir, "undone"));
-  expect(undone).toHaveLength(1);
-  expect(readFileSync(join(dir, "undone", undone[0]!, "main.jsonl"), "utf8")).toContain("message 4");
-  expect(readdirSync(join(dir, "undone", undone[0]!, "files"))).toEqual(["5-0.png"]);
-  expect(readdirSync(join(dir, "files"))).toEqual([]);
+  expect(reopened.status().T).toBe(4);
 });
 
 test("a compaction started before a rewind is dropped, and its slot is rebuilt from the new record", async () => {

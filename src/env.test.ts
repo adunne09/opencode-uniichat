@@ -3,6 +3,7 @@ import { Model, Provider } from "@opencode/plugin/effect";
 import { Path } from "@opencode/util/global";
 import { Effect, Schema } from "effect";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { agentsMd, latestHaiku, stateInput } from "./env.ts";
@@ -14,7 +15,7 @@ afterEach(() => {
 });
 
 function fixture() {
-  const base = realpathSync(mkdtempSync("/tmp/opencode/uniichat-env-"));
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "uniichat-env-")));
   temps.push(base);
   const dir = (...parts: string[]) => {
     const path = join(base, ...parts);
