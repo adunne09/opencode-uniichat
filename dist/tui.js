@@ -86,14 +86,14 @@ function errorMessage(error) {
 var tokens = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
 var duration = (ms) => ms >= 60000 ? `${(ms / 60000).toFixed(1)} min` : ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.round(ms)} ms`;
 var kilobytes = (bytes) => `${(bytes / 1000).toFixed(1)} KB`;
-function usageLabel(usage2) {
-  if (!usage2)
+function usageLabel(usage) {
+  if (!usage)
     return "none yet";
-  const parts = [`${tokens(usage2.input)} in`, `${tokens(usage2.output)} out`, `cache ${tokens(usage2.cacheRead)} read / ${tokens(usage2.cacheWrite)} write`];
-  if (Number.isFinite(usage2.cost) && usage2.cost > 0)
-    parts.push(`$${usage2.cost.toFixed(2)}`);
-  if (usage2.ms !== undefined)
-    parts.push(duration(usage2.ms));
+  const parts = [`${tokens(usage.input)} in`, `${tokens(usage.output)} out`, `cache ${tokens(usage.cacheRead)} read / ${tokens(usage.cacheWrite)} write`];
+  if (Number.isFinite(usage.cost) && usage.cost > 0)
+    parts.push(`$${usage.cost.toFixed(2)}`);
+  if (usage.ms !== undefined)
+    parts.push(duration(usage.ms));
   return parts.join("  \xB7  ");
 }
 var LINE = /^(\d+)\+(\d+)\|/;
@@ -111,7 +111,7 @@ function Popup(props) {
   const dimensions = useTerminalDimensions();
   const outer = () => Math.max(12, dimensions().height - 6);
   const page = () => Math.max(1, (scroll?.viewport.height ?? outer()) - 1);
-  const [status2, setStatus] = createSignal();
+  const [status, setStatus] = createSignal();
   const [lines, setLines] = createSignal([]);
   const [loading, setLoading] = createSignal(true);
   const [statusError, setStatusError] = createSignal();
@@ -355,7 +355,7 @@ function Popup(props) {
     }, _$p));
     return _el$4;
   })();
-  const gutter = (lines2) => Math.max(4, ...lines2.map((line) => LINE.exec(line)?.[0].length ?? 0)) + 1;
+  const gutter = (lines) => Math.max(4, ...lines.map((line) => LINE.exec(line)?.[0].length ?? 0)) + 1;
   const Line = (row) => {
     const head = LINE.exec(row.line);
     const body = head ? row.line.slice(head[0].length) : row.line;
@@ -417,9 +417,9 @@ function Popup(props) {
     _$insertNode(_el$13, _$createTextNode(`UniiChat`));
     _$insert(_el$11, _$createComponent(Show, {
       get when() {
-        return status2();
+        return status();
       },
-      children: (current2) => current2().on ? (() => {
+      children: (current) => current().on ? (() => {
         var _el$22 = _$createElement("span");
         _$insertNode(_el$22, _$createTextNode(`   \u25CF on`));
         _$effect((_$p) => _$setProp(_el$22, "style", {
@@ -439,7 +439,7 @@ function Popup(props) {
     _$setProp(_el$15, "onMouseUp", () => ctx.ui.dialog.clear());
     _$insert(_el$1, _$createComponent(Show, {
       get when() {
-        return status2();
+        return status();
       },
       get fallback() {
         return (() => {
@@ -453,8 +453,8 @@ function Popup(props) {
           return _el$26;
         })();
       },
-      children: (current2) => {
-        const chat = () => current2().chat;
+      children: (current) => {
+        const chat = () => current().chat;
         const active = () => (chat()?.pending ?? 0) + (chat()?.inFlight ?? 0) > 0;
         return (() => {
           var _el$27 = _$createElement("box");
@@ -484,7 +484,7 @@ function Popup(props) {
           _$insert(_el$27, _$createComponent(Stat, {
             label: "Last turn",
             get children() {
-              return usageLabel(current2().lastTurn);
+              return usageLabel(current().lastTurn);
             }
           }), null);
           _$insert(_el$27, _$createComponent(Show, {
@@ -682,7 +682,7 @@ function Popup(props) {
 var [stateVersion, bumpState] = createSignal(0);
 function SidebarIndicator(props) {
   const ctx = props.ctx;
-  const [on2, setOn] = createSignal();
+  const [on, setOn] = createSignal();
   const [failed, setFailed] = createSignal(false);
   const [chatError, setChatError] = createSignal(false);
   createEffect(() => {
@@ -695,7 +695,7 @@ function SidebarIndicator(props) {
     let timer;
     const poll = async () => {
       try {
-        const status2 = await rpcClient(ctx).status({
+        const status = await rpcClient(ctx).status({
           sessionID
         }, {
           location: ctx.location,
@@ -703,8 +703,8 @@ function SidebarIndicator(props) {
         });
         if (controller.signal.aborted)
           return;
-        setOn(status2.on);
-        setChatError(status2.chat?.lastError !== undefined);
+        setOn(status.on);
+        setChatError(status.chat?.lastError !== undefined);
         setFailed(false);
       } catch {
         if (!controller.signal.aborted)
@@ -720,8 +720,8 @@ function SidebarIndicator(props) {
         clearTimeout(timer);
     });
   });
-  const label = () => failed() ? "error" : on2() === undefined ? "\u2026" : on2() ? "enabled" : "disabled";
-  const color = () => failed() ? ctx.theme.text.feedback.error.base : on2() ? ctx.theme.text.feedback.success.base : ctx.theme.text.muted;
+  const label = () => failed() ? "error" : on() === undefined ? "\u2026" : on() ? "enabled" : "disabled";
+  const color = () => failed() ? ctx.theme.text.feedback.error.base : on() ? ctx.theme.text.feedback.success.base : ctx.theme.text.muted;
   return (() => {
     var _el$43 = _$createElement("text"), _el$44 = _$createElement("span"), _el$46 = _$createElement("span");
     _$insertNode(_el$43, _el$44);
@@ -805,18 +805,18 @@ var tui_default = Plugin.define({
                   return;
                 }
                 try {
-                  const session2 = await ctx.client.session.create(ctx.location ? {
+                  const session = await ctx.client.session.create(ctx.location ? {
                     location: ctx.location
                   } : {});
                   await rpcClient(ctx).set({
-                    sessionID: session2.id,
+                    sessionID: session.id,
                     on: true
                   }, {
                     location: ctx.location
                   });
                   ctx.ui.router.navigate({
                     type: "session",
-                    sessionID: session2.id
+                    sessionID: session.id
                   });
                   ctx.ui.toast.show({
                     variant: "success",
