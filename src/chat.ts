@@ -237,6 +237,14 @@ export class Chat {
     return prompts.mergeTask(tree.name(...a), tree.name(...b), tree.first(...ref), tree.last(...ref), view.renderLine(a, this.lookup(...a)), view.renderLine(b, this.lookup(...b)));
   }
 
+  // A node's source as one line, cut to the node limit: the line of a compaction that returned none.
+  private clippedSource(ref: tree.Ref) {
+    const source = ref[0] === 0
+      ? `${this.records.get(ref[1])!.kind}: ${this.records.get(ref[1])!.text}`
+      : tree.children(ref).map((child) => this.lookup(...child)!).join("\n");
+    return record.cutUtf8(source.replace(/\s*(\r\n|\r|\n)\s*/g, " "), tree.NODE_LIMIT);
+  }
+
   private compact(ref: tree.Ref): Effect.Effect<string, unknown> {
     const self = this;
     return Effect.gen(function* () {
@@ -259,10 +267,11 @@ export class Chat {
       }
       const system = self.systemText!;
       const tools = self.tools!;
-      let turns: { role: "user" | "assistant"; parts: { text: string; cache?: boolean }[] }[] = [{ role: "user", parts: [
+      const first: { role: "user"; parts: { text: string; cache?: boolean }[] } = { role: "user", parts: [
         ...rendered.blocks.map((text, i) => ({ text, ...(i === rendered.blocks.length - 1 ? { cache: true } : {}) })),
         { text: rendered.tail }, { text: self.task(ref), cache: true },
-      ] }];
+      ] };
+      let turns: compactor.Input["turns"] = [first];
       return yield* Effect.gen(function* () {
         let shortest: string | undefined;
         for (let attempt = 0; attempt < COMPACTION.tries; attempt++) {
@@ -286,18 +295,16 @@ export class Chat {
           const line = out.text?.trim();
           if (line === undefined) {
             if (shortest !== undefined) return shortest;
-            return yield* Effect.fail(new ChatError({ message: noTextMessage() }));
+            // The model answered with no line (a refusal, or thinking used the whole output limit).
+            // Asking again fails alike, so the node becomes its source clipped and the chat goes on.
+            yield* Effect.logWarning(`UniiChat compaction of ${tree.name(...ref)} returned no text; using its source clipped`);
+            return self.clippedSource(ref);
           }
           if (shortest === undefined || record.utf8Size(line) < record.utf8Size(shortest)) shortest = line;
           if (record.utf8Size(line) <= 512) return line;
           if (attempt === COMPACTION.tries - 1) break;
-          const previous = turns.at(-1)!;
-          turns = [
-            ...turns.slice(0, -1),
-            { ...previous, parts: previous.parts.map((part, i) => i === previous.parts.length - 1 ? { text: part.text } : part) },
-            { role: "assistant", parts: [{ text: line }] },
-            { role: "user", parts: [{ text: prompts.tooLong(record.utf8Size(line), record.cutUtf8(line, 512)), cache: true }] },
-          ];
+          // A retry resends the first request plus a note on the last line only: never a try's words.
+          turns = [{ role: "user", parts: [...first.parts, { text: prompts.tooLong(record.utf8Size(line), record.cutUtf8(line, 512)) }] }];
         }
         return shortest!;
       }).pipe(Effect.ensuring(Effect.gen(function* () {
@@ -428,7 +435,10 @@ export class Chat {
         return { text: records.map((rec) => `${rec.i}|${rec.kind}: ${rec.text}`).join("\n") };
       }
       const ref = n === undefined ? undefined : tree.parseZoom(n, id);
-      if (!ref || tree.last(...ref) >= self.T) return yield* Effect.fail(new ChatError({ message: "zoom needs a valid id and power-of-two n inside the chat" }));
+      if (!ref || tree.last(...ref) >= self.T) {
+        const roots = tree.roots(self.T).map((root) => tree.name(...root)).join(", ");
+        return yield* Effect.fail(new ChatError({ message: `No line ${id}+${n ?? "?"}: n is a power of 2, id a multiple of n, inside the chat. The tree's roots: ${roots || "none"}.` }));
+      }
       if (n !== 1) return { text: tree.children(ref).map((child) => view.renderLine(child, self.lookup(...child))).join("\n") };
       const rec = self.records.get(id)!;
       const files: { mime: string; data: Uint8Array }[] = [];
@@ -513,10 +523,6 @@ export class Chat {
       ...(this.last === undefined ? {} : { last: { ...this.last } }), total: { ...this.total },
     };
   }
-}
-
-export function noTextMessage() {
-  return "Compaction returned no text. OpenCode does not report why; usually the model spent its whole output limit on thinking (raise compaction.maxTokens or lower its effort) or called a tool.";
 }
 
 const registry = new Map<string, Deferred.Deferred<Chat, StoreError>>();

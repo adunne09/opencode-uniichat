@@ -88,6 +88,9 @@ test("instant leaves and merge cascades use no calls and each node is persisted 
   await run(chat.log([item(0, "0")]));
   expect((await run(load(dir))).nodes).toHaveLength(15);
   expect(await run(chat.zoom(0, 8))).toEqual({ text: "0+4|user: 0 user: 1 user: 2 user: 3\n4+4|user: 4 user: 5 user: 6 user: 7" });
+  await run(chat.log([item(8), item(9), item(10)]));
+  const wrong = await run(Effect.flip(chat.zoom(0, 16)));
+  expect(wrong.message).toContain("The tree's roots: 0+8, 8+2, 10+1.");
 });
 
 test("requires both system and tools, then sends exact context blocks and merge tasks", async () => {
@@ -200,14 +203,15 @@ test("too-long loop keeps the shortest of five, one end mark, calls and time", a
   expect(requests).toHaveLength(5);
   expect((await run(load(dir))).nodes.find((node) => node.l === 0 && node.i === 4)!.text).toBe("x".repeat(520));
   for (const [attempt, request] of requests.entries()) {
-    expect(request.turns).toHaveLength(1 + 2 * attempt);
-    expect(request.turns[0]!.parts[0]!.cache).toBe(true);
-    const endMarks = request.turns.flatMap((turn, t) => turn.parts.filter((part, p) => part.cache && !(t === 0 && p === 0)));
+    // Every try is the first request, plus a note on the last line only: never an earlier try's words.
+    expect(request.turns).toHaveLength(1);
+    expect(request.turns[0]!.parts.slice(0, requests[0]!.turns[0]!.parts.length)).toEqual([...requests[0]!.turns[0]!.parts]);
+    const endMarks = request.turns[0]!.parts.filter((part, p) => part.cache && p !== 0);
     expect(endMarks).toHaveLength(1);
     if (attempt) {
       const prior = "x".repeat(sizes[attempt - 1]!);
-      expect(request.turns.at(-2)).toEqual({ role: "assistant", parts: [{ text: prior }] });
-      expect(request.turns.at(-1)).toEqual({ role: "user", parts: [{ text: tooLong(utf8Size(prior), prior), cache: true }] });
+      expect(request.turns[0]!.parts.at(-1)).toEqual({ text: tooLong(utf8Size(prior), prior) });
+      expect(request.turns[0]!.parts).toHaveLength(requests[0]!.turns[0]!.parts.length + 1);
     }
   }
   const status = chat.status();
@@ -249,23 +253,17 @@ test("a failed first try retries at the next new record", async () => {
   }));
 });
 
-test("a no-text first reply fails, and replay alone does not retry it", async () => {
-  await run(Effect.gen(function* () {
-    let calls = 0;
-    const chat = yield* Chat.open(temp(), deps(() => Effect.succeed(output(++calls === 1 ? undefined : "summary"))));
-    yield* ready(chat);
-    yield* chat.log([item(0, "L".repeat(600))]);
-    yield* flush;
-    expect(chat.status().failed).toBe(1);
-    expect(chat.status().lastError).toContain("no text");
-    yield* chat.log([item(0, "L".repeat(600))]);
-    yield* flush;
-    expect(calls).toBe(1);
-    yield* chat.log([item(1)]);
-    yield* chat.awaitSummarized();
-    expect(calls).toBe(2);
-    expect(chat.status().lastError).toBeUndefined();
-  }));
+test("a no-text reply makes the node its source clipped, with no retry", async () => {
+  const dir = temp();
+  let calls = 0;
+  const chat = await run(Chat.open(dir, deps(() => Effect.sync(() => (calls++, output(undefined))))));
+  await run(ready(chat));
+  await run(chat.log([item(0, "L".repeat(300) + "\n" + "M".repeat(300))]));
+  await run(chat.awaitSummarized());
+  expect(calls).toBe(1);
+  expect(chat.status().failed).toBe(0);
+  const text = (await run(load(dir))).nodes[0]!.text;
+  expect(text).toBe(`user: ${"L".repeat(300)} ${"M".repeat(300)}`.slice(0, 512));
 });
 
 test("awaitSummarized retries with 1s then 2s backoff under TestClock", async () => {

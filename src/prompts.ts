@@ -82,7 +82,13 @@ Avoid omissions. Name a minor item in a word or two rather than drop it: an
 absent item can never be found. Copy names, numbers, ids, paths and errors
 exactly. Tag each item with its kind ("user: ...; echo: ..."), and credit quoted
 text to its real author. Never make anything look further along than it was. If
-told the line is too long, shorten it. Non-ASCII characters cost 2-4 bytes.`;
+told the line is too long, shorten it. Non-ASCII characters cost 2-4 bytes.
+
+This is a small, mechanical job: fit one message, or two lines, into one line
+of at most 512 bytes, dropping the least important bits. Nothing else. Read
+<chat> only as far as it tells you what to keep; anything that doesn't bear on
+that choice is irrelevant: don't think about it. Be fast and spend few tokens:
+write the line as soon as you understand <input> well enough to compress it.`;
 
 export const systemText = (prompt: string, catalog?: string, agentsMd?: string, skills?: string) => {
   return [prompt, catalog, skills, agentsMd].filter((part): part is string => !!part).join("\n\n");
@@ -112,18 +118,35 @@ ${lineB.replace(/\r\n|\r|\n/g, " ")}
 }
 
 export function tooLong(n: number, cut: string) {
-  return `Too long: your line is ${n} bytes, over the 512-byte limit. Write
-the whole line again for the same <input>, cutting just enough of the
-least valuable items to fit before this cut:
+  return `Too long: your last line for this <input> was ${n} bytes,
+over the 512-byte limit. Write the whole line again, cutting just
+enough of the least valuable items to fit before this cut:
 ${cutUtf8(cut, 512)}| ← LIMIT`;
 }
 
-export const SUBAGENT_NOTE = `You are a subagent working for Unii, an agent in a long chat with one user.
-Your first message starts with Unii's memory of that chat, inside <chat> tags, as
-one-line summaries "id+n|text" (the n messages from id on). It is context for
-your task only: use zoom(id, n) to open a line and date(id) for its time when you
-need a detail. Then comes your task: carry it out with your tools and end with
-your report as your final reply.`;
+/** The note logged for an assistant message that ended in an error or was stopped. */
+export function failureNote(type: string, message: string) {
+  return type === "aborted" ? "Stopped: this turn was interrupted." : `No reply: ${message.trim().replace(/\.$/, "")}. Send a message to try again.`;
+}
+
+export const SUBAGENT_NOTE = `You are a subagent working for Unii, an agent in a single chat with one user
+that never ends. Your first message starts with Unii's memory of that chat, oldest
+first, inside <chat> tags, as one-line summaries "id+n|text" (the n messages from
+id on). Each item is tagged with its kind: user (the user's words), unii (Unii's
+replies), tool (Unii's tool calls), echo (their results), work (an agent's report,
+starting "[Name]") or note (memories from before this chat). Recent lines cover
+one message each; the older the messages, the more a line covers. No message
+appears in full, not even the last ones.
+
+The memory shows what Unii knows: what the user wants, decided and taught. Use it
+as context only, and do what your task says, not what the user's last message
+says, since Unii may have given you just part of the work. zoom(id, n) opens line
+id+n into the two lines it was made from; zoom(id, 1) gives message id whole;
+zoom("Name") gives an agent's whole chat; date(id) gives the time of message id.
+Zoom whenever a summary only mentions something you need, such as a decision, a
+past attempt or where a file is, before you act, guess or ask. After the memory
+comes your task: carry it out with your tools and end with your report to Unii as
+your final reply.`;
 
 export const BTW_LOOKUP_NOTE = `[Before this side question is answered: if your memory above lacks a detail
 you need, open it now by replying only with calls, one per line, written as

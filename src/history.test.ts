@@ -77,6 +77,15 @@ describe("history log items", () => {
     ]);
   });
 
+  test("a failed or stopped assistant message leaves a note after its results", () => {
+    const failed = { ...assistant([{ type: "text", text: "partial" }]), error: { type: "provider.content-filter", message: "Provider blocked the response" } } as Row;
+    const stopped = { ...assistant([]), id: "msg_b", error: { type: "aborted", message: "Step interrupted" } } as Row;
+    expect(items([failed, stopped], { name }).filter((item) => item.kind === "note").map((item) => [item.src, item.text])).toEqual([
+      ["msg_a:error", "No reply: Provider blocked the response. Send a message to try again."],
+      ["msg_b:error", "Stopped: this turn was interrupted."],
+    ]);
+  });
+
   test("streaming calls and pending results are not logged", () => {
     const rows = [assistant([tool("stream", { status: "streaming", input: '{"path":' }), tool("running", { status: "running", input: { path: "a" }, metadata: {} }), { type: "text", text: "" }, { type: "reasoning", text: "secret" }])];
     expect(items(rows, { name }).map((item) => item.src)).toEqual(["running:call"]);

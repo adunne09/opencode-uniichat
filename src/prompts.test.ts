@@ -16,9 +16,10 @@ of them from there too.
 {line a}
 {line b}
 </input>`;
-const recipeTooLong = `Too long: your line is {N} bytes, over the 512-byte limit. Write
-the whole line again for the same <input>, cutting just enough of the
-least valuable items to fit before this cut:
+// The wording of VictorTaelin/UniiChat's Memory.ts (0500bf6), sent as a note on the first request.
+const recipeTooLong = `Too long: your last line for this <input> was {N} bytes,
+over the 512-byte limit. Write the whole line again, cutting just
+enough of the least valuable items to fit before this cut:
 {its first 512 bytes}| ← LIMIT`;
 
 describe("recipe prompts", () => {

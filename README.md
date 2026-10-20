@@ -63,7 +63,7 @@ They go in the plugin's `options` object. The defaults are the recipe's values.
 | `compaction.maxTokens` | `32000` | Output limit for one compaction call. |
 | `compaction.providerOptions` | `{}` | Extra provider options sent with each compaction call. |
 | `compaction.timeoutMs` | `240000` | A call with no answer by then fails, and is retried. |
-| `compaction.tries` | `5` | Tries per node in the recipe's "Too long" loop. |
+| `compaction.tries` | `5` | Tries per node in the "Too long" loop. |
 | `compaction.concurrency` | `8` | Compaction calls in flight at once. |
 | `view.chat` | `{ "high": 128000, "low": 64000 }` | Chat view byte budget: when it passes `high`, it is merged down to `low`. |
 | `view.compaction` | `{ "high": 32000, "low": 16000 }` | Compaction view byte budget. |
@@ -85,7 +85,7 @@ Each one is an [architecture decision record](docs/adr/README.md).
 1. **One chat per OpenCode session** ([0000](docs/adr/0000-follow-the-recipe.md), [0006](docs/adr/0006-switch.md)). Each session has its own memory and its own on/off switch. Off is plain OpenCode.
 2. **The fresh call happens inside the OpenCode session** ([0001](docs/adr/0001-fresh-call-per-turn-inside-one-opencode-session.md)). The recipe calls each turn "in a fresh session". Here the session stays for its UI and transcript, and only the model request is rebuilt as `[tools][system][view][state][message]` plus the turn's own steps.
 3. **System prompt** ([0002](docs/adr/0002-system-prompt.md), [0013](docs/adr/0013-codemode-catalog.md), [0045](docs/adr/0045-skills-in-system-prompt.md)). This is the recipe's prompt without the "open devices" paragraph, because OpenCode tools run locally.
-4. **Compaction model and effort** ([0048](docs/adr/0048-compaction-effort-high.md), [0052](docs/adr/0052-model-calls-through-opencode.md)). The default is Claude Haiku at `high` effort, not `xhigh`. At `xhigh` it sometimes spent its whole output limit thinking.
+4. **Compaction model and effort** ([0048](docs/adr/0048-compaction-effort-high.md), [0052](docs/adr/0052-model-calls-through-opencode.md)). The default is Claude Haiku at `high` effort, not `xhigh`. At `xhigh` it sometimes spent its whole output limit thinking. Victor's released code also uses `high`.
 5. **Compaction calls go through OpenCode** ([0052](docs/adr/0052-model-calls-through-opencode.md)). Each call runs in a throwaway child session, so it uses your providers and credentials.
 6. **Extra cache marks** ([0005](docs/adr/0005-cache-marks.md)). OpenCode may add up to two cache marks of its own on the tools/system prefix.
 7. **No lock on the log** ([0041](docs/adr/0041-drop-chat-lock.md)). The recipe says "hold a lock". A session is never open in two OpenCode servers at once, so the lock was redundant.
@@ -100,11 +100,22 @@ These are additions the recipe does not cover:
 - compaction timeout ([0042](docs/adr/0042-compaction-call-timeout.md))
 - `/btw` from memory ([0046](docs/adr/0046-btw-from-memory.md))
 - the popup ([0012](docs/adr/0012-ui.md), [0047](docs/adr/0047-popup-browse.md))
+
+Victor has since released his code, [VictorTaelin/UniiChat](https://github.com/VictorTaelin/UniiChat). These follow that code where it differs from the recipe:
+
+- a compaction that returns no text uses its source clipped to 512 bytes ([0056](docs/adr/0056-no-text-clips-the-source.md))
+- the "fast and small" paragraph at the end of the system prompt ([0057](docs/adr/0057-compaction-prompt-fast-and-small.md))
+- "Too long" retries resend the first request with one note ([0058](docs/adr/0058-too-long-retry-single-note.md))
+- failed and stopped turns leave a `note` in memory ([0059](docs/adr/0059-failed-turns-leave-a-note.md))
+- a bad zoom lists the tree's roots ([0060](docs/adr/0060-zoom-error-lists-roots.md))
+- the subagent note explains the view ([0061](docs/adr/0061-subagent-note-explains-the-view.md))
 - options ([0054](docs/adr/0054-plugin-options.md))
+
+One difference from that code is kept on purpose. Victor's turns don't wait for an import to be summarized. Here the first turn after switch-on waits, so the model sees the whole session ([0062](docs/adr/0062-imports-block-the-first-turn.md)).
 
 ## Limitations
 
-- OpenCode's generate API returns text only. The popup shows compaction call counts and times, but not token usage or cost. When a compaction returns no text, the reason is not reported.
+- OpenCode's generate API returns text only. The popup shows compaction call counts and times, but not token usage or cost. When a compaction returns no text, the reason is not reported; the node uses its source clipped.
 - A compaction's throwaway session may show briefly as a child session.
 - If a single turn outgrows the model's context window, the request fails (recipe-strict, [0008](docs/adr/0008-raw-turn-overflow.md)).
 - Tested on Linux with Bun 1.4.

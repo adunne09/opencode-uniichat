@@ -1,6 +1,7 @@
 import type { Schema } from "effect";
 import type { SessionMessage } from "@opencode/schema/session-message";
 import type { ContentPart, Message, SystemPart } from "@opencode/ai";
+import { failureNote } from "./prompts.ts";
 import { echoText, toolResultSrc, toolText, type Kind } from "./record.ts";
 
 export type Row = Schema.Codec.Encoded<typeof SessionMessage.Info>;
@@ -108,6 +109,8 @@ export function items(rows: readonly Row[], opts: { name: (childID: string) => s
         ...(files.length ? { files } : {}),
       });
     }
+    // A turn that failed or was stopped leaves a note, so memory knows it ended without a reply.
+    if (row.error) result.push({ kind: "note", text: failureNote(row.error.type, row.error.message), date: row.time.completed ?? date, src: `${row.id}:error` });
   }
   return result;
 }

@@ -63,3 +63,10 @@ A new decision gets the next number; a changed decision gets a new record, and t
 | [0053](0053-distribution.md) | Install from GitHub; ship the TUI prebuilt | Accepted |
 | [0054](0054-plugin-options.md) | Everything tunable is an option | Accepted |
 | [0055](0055-own-repo-mit.md) | MIT license | Accepted |
+| [0056](0056-no-text-clips-the-source.md) | A compaction with no text uses its source clipped | Accepted |
+| [0057](0057-compaction-prompt-fast-and-small.md) | "Fast and small" paragraph in the system prompt | Accepted |
+| [0058](0058-too-long-retry-single-note.md) | "Too long" retries resend the first request with one note | Accepted |
+| [0059](0059-failed-turns-leave-a-note.md) | Failed and stopped turns leave a note | Accepted |
+| [0060](0060-zoom-error-lists-roots.md) | A bad zoom lists the tree's roots | Accepted |
+| [0061](0061-subagent-note-explains-the-view.md) | The subagent note explains the view | Accepted |
+| [0062](0062-imports-block-the-first-turn.md) | Imported turns block the first turn | Accepted |

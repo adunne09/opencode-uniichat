@@ -13,6 +13,18 @@ export function children([l, i]: Ref): [Ref, Ref] {
   return [[l - 1, i * 2], [l - 1, i * 2 + 1]];
 }
 
+/** The tree's roots over T messages: one node per power of two in T, largest first. */
+export function roots(T: number): Ref[] {
+  const out: Ref[] = [];
+  for (let l = Math.floor(Math.log2(Math.max(T, 1))), id = 0; l >= 0; l--) {
+    if (id + 2 ** l <= T) {
+      out.push([l, id / 2 ** l]);
+      id += 2 ** l;
+    }
+  }
+  return out;
+}
+
 export function parseZoom(n: number, id: number): Ref | undefined {
   // The equality check rejects nearby integers that Math.log2 rounds to a whole number.
   if (!Number.isSafeInteger(n) || n < 1 || !Number.isInteger(Math.log2(n)) ||
