@@ -10,7 +10,7 @@ const idle = (id: string): Row => ({ type: "idle", id, outcome: "succeeded", tim
 type Tool = Extract<Extract<Row, { type: "assistant" }> ["content"][number], { type: "tool" }>;
 const tool = (id: string, state: Tool["state"]): Tool => ({ type: "tool", id, name: "read", state, time: { ...time, completed: time.created + 10 } });
 const assistant = (content: Extract<Row, { type: "assistant" }> ["content"], id = "msg_a"): Row => ({ type: "assistant", id, agent: "build", model, content, time });
-const checkpoint = (status: "completed" | "running" = "completed"): Row => ({ type: "compaction", id: "msg_checkpoint", status, reason: "auto", summary: "summary", recent: "", time });
+const checkpoint = (status: "completed" | "running" = "completed"): Row => ({ type: "compaction", id: "msg_checkpoint", status, reason: "auto", summary: "summary", time });
 const wrapper = (report: string) => `<subagent sessionID="ses_child" state="completed" description="task">\n${report}\n</subagent>`;
 const name = (id: string) => id === "ses_child" ? "explore-1" : "unknown";
 const msg = (role: RequestMessage["role"], id?: string, text = "task"): RequestMessage => ({ role, id, content: [{ type: "text", text }] });
@@ -46,8 +46,8 @@ describe("durable turn boundaries", () => {
     expect(cutTurn([])).toBe(false);
     expect(cutTurn([{ type: "compaction", id: "msg_failed", status: "failed", reason: "auto", error: { type: "unknown", message: "failed" }, time }])).toBe(false);
     // UniiChat's own stub, tagged or (older) recognised by its text, does not cut the turn.
-    const tagged: Row = { type: "compaction", id: "msg_stub", status: "completed", reason: "auto", summary: "x", recent: "", metadata: { uniichat: "skipped" }, time };
-    const legacy: Row = { type: "compaction", id: "msg_stub2", status: "completed", reason: "auto", summary: STUB_SUMMARY, recent: "", time };
+    const tagged: Row = { type: "compaction", id: "msg_stub", status: "completed", reason: "auto", summary: "x", metadata: { uniichat: "skipped" }, time };
+    const legacy: Row = { type: "compaction", id: "msg_stub2", status: "completed", reason: "auto", summary: STUB_SUMMARY, time };
     expect(isStub(tagged) && isStub(legacy) && !isStub(checkpoint())).toBe(true);
     expect(cutTurn([idle("msg_idle"), user("msg_new"), tagged])).toBe(false);
     expect(cutTurn([idle("msg_idle"), user("msg_new"), legacy, checkpoint()])).toBe(true);

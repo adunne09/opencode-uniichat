@@ -5,7 +5,7 @@ import { Message } from "@opencode/ai";
 import { Session } from "@opencode/schema/session";
 import { SessionMessage } from "@opencode/schema/session-message";
 import { Tool } from "@opencode/schema/tool";
-import { Cause, Data, Effect, Exit, Layer, Schema, Semaphore, Stream } from "effect";
+import { Cause, Data, DateTime, Effect, Exit, Layer, Schema, Semaphore, Stream } from "effect";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import * as engine from "./chat.ts";
@@ -60,6 +60,20 @@ function sources(sessionID: string) {
     },
     catch: error,
   });
+}
+
+// Our schema copy can lag the running OpenCode (2.1.0 dropped compaction `recent`, failing every step).
+// If it rejects a row, convert decoded values by hand instead of failing the session.
+const encodeRow = Schema.encodeSync(SessionMessage.Info);
+export function toWire(row: SessionMessage.Info): history.Row {
+  try { return encodeRow(row); } catch { return plain(row) as history.Row; }
+}
+export function plain(value: unknown): unknown {
+  if (DateTime.isDateTime(value)) return DateTime.toEpochMillis(value);
+  if (value instanceof Date) return value.getTime();
+  if (Array.isArray(value)) return value.map(plain);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined).map(([k, v]) => [k, plain(v)]));
+  return value;
 }
 
 function older(sessionID: string, has: (row: history.Row) => boolean) {
@@ -128,7 +142,7 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
   }));
   // Effect APIs return decoded DateTime values. The log mapper accepts wire rows.
   const readHistory = (sessionID: string) => ctx.session.context({ sessionID: id(sessionID) }).pipe(
-    Effect.map((rows) => rows.map((row) => Schema.encodeSync(SessionMessage.Info)(row))),
+    Effect.map((rows) => rows.map(toWire)),
   );
   // A UniiChat stub compaction inside the current turn makes OpenCode's context start at the stub,
   // so the turn's start is missing. Read the turn from its opening idle on, from the full list.

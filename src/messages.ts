@@ -1,5 +1,5 @@
 // Session rows -> model messages, for the part of a turn that a UniiChat stub compaction hid from
-// OpenCode's request. A port of OpenCode's `session/runner/to-llm-message.ts` (v2.0.30), which
+// OpenCode's request. A port of OpenCode's `session/runner/to-llm-message.ts` (v2.1.0), which
 // plugins cannot import. Native provider checkpoints are left out: a turn cut by one still fails.
 import { Media, Message, ReasoningEfforts, ToolCallPart, ToolResultPart, type ContentPart, type ProviderMetadata } from "@opencode/ai";
 import { fileURLToPath } from "node:url";
@@ -106,9 +106,9 @@ const assistant = (message: AssistantRow, model: ModelRef, key: string): Message
   const reuse = sameModel && message.error === undefined;
   const interrupted = message.content.some((item) => item.type === "reasoning" && item.time !== undefined && item.time.completed === undefined);
   const content = message.content.flatMap((item): ContentPart[] => {
-    if (item.type === "text") return [{ type: "text", text: item.text, providerMetadata: reuse ? meta(key, item.state) : undefined } as ContentPart];
+    if (item.type === "text") return [{ type: "text", text: item.text, providerMetadata: reuse ? meta(key, item.native) : undefined } as ContentPart];
     if (item.type === "reasoning") {
-      if (reuse && !interrupted) return [{ type: "reasoning", text: item.text, providerMetadata: meta(key, item.state) } as ContentPart];
+      if (reuse && !interrupted) return [{ type: "reasoning", text: item.text, providerMetadata: meta(key, item.native) } as ContentPart];
       return item.text.length > 0 ? [{ type: message.error === undefined && !interrupted ? "reasoning" : "text", text: item.text } as ContentPart] : [];
     }
     if (item.type !== "tool") return [];
@@ -118,12 +118,10 @@ const assistant = (message: AssistantRow, model: ModelRef, key: string): Message
       name: item.name,
       input: toolInput(item),
       providerExecuted: item.executed,
-      providerMetadata: reuseTool ? meta(key, item.providerState) : undefined,
+      providerMetadata: reuseTool ? meta(key, item.native) : undefined,
     } as Parameters<typeof ToolCallPart.make>[0]);
     if (item.executed !== true) return [call];
-    const result = toolResult(item, reuseTool
-      ? meta(key, item.providerResultState ?? item.providerState)
-      : sameProvider && item.providerResultState !== undefined ? meta(key, item.providerResultState) : undefined);
+    const result = toolResult(item, sameProvider ? meta(key, item.native) : undefined);
     return result ? [call, result] : [call];
   });
   const meaningful = content.filter((part) => {
@@ -133,7 +131,7 @@ const assistant = (message: AssistantRow, model: ModelRef, key: string): Message
   });
   const results = message.content
     .filter((item): item is ToolPart => item.type === "tool" && item.executed !== true)
-    .map((item) => toolResult(item, reuse ? meta(key, item.providerResultState ?? item.providerState) : undefined))
+    .map((item) => toolResult(item, reuse ? meta(key, item.native) : undefined))
     .filter((part) => part !== undefined)
     .map((part) => Message.tool(part));
   if (meaningful.length === 0) return results;

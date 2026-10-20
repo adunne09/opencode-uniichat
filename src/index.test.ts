@@ -5,7 +5,7 @@ import type { SessionContext, SessionCompaction } from "@opencode/plugin/effect/
 import { SessionMessage } from "@opencode/schema/session-message";
 import { Session } from "@opencode/schema/session";
 import { DateTime, Deferred, Effect, Queue, Schema, Stream } from "effect";
-import { integrate, type IntegrationOptions } from "./index.ts";
+import { integrate, toWire, type IntegrationOptions } from "./index.ts";
 import type { Row, Item } from "./history.ts";
 import { blocks } from "./view.ts";
 import { SUBAGENT_NOTE, SYSTEM_PROMPT } from "./prompts.ts";
@@ -186,7 +186,7 @@ test("a child of a disabled parent stays vanilla", async () => {
 });
 
 test("restart recovery logs only anchored segments, before freezing the new input", async () => {
-  const checkpoint: Row = { type: "compaction", id: "msg_cp", status: "completed", reason: "auto", summary: "summary", recent: "", time: { created: 1000 } };
+  const checkpoint: Row = { type: "compaction", id: "msg_cp", status: "completed", reason: "auto", summary: "summary", time: { created: 1000 } };
   const f = fixture([checkpoint, idle("msg_after_cp"), user("msg_new", "new input")]);
   f.options.sources = () => Effect.succeed(new Set(["msg_recorded"]));
   f.options.older = () => Effect.succeed([
@@ -210,7 +210,7 @@ test("restart recovery logs only anchored segments, before freezing the new inpu
 });
 
 test("first switch-on imports earlier vanilla turns, even before a checkpoint, into the frozen view", async () => {
-  const checkpoint: Row = { type: "compaction", id: "msg_cp", status: "completed", reason: "auto", summary: "summary", recent: "", time: { created: 1000 } };
+  const checkpoint: Row = { type: "compaction", id: "msg_cp", status: "completed", reason: "auto", summary: "summary", time: { created: 1000 } };
   const f = fixture([checkpoint, idle("msg_after_cp"), user("msg_new", "new input")]);
   let asked = 0;
   f.options.older = () => Effect.sync(() => {
@@ -266,7 +266,7 @@ test("off, vanilla compaction, and on proceed after restart without discovery or
   f.options.sources = () => Effect.succeed(new Set(["msg_before_off"]));
   let discoveries = 0;
   f.options.older = () => Effect.sync(() => { discoveries++; return undefined; });
-  const checkpoint: Row = { type: "compaction", id: "msg_cp", status: "completed", reason: "auto", summary: "vanilla summary", recent: "", time: { created: 1000 } };
+  const checkpoint: Row = { type: "compaction", id: "msg_cp", status: "completed", reason: "auto", summary: "vanilla summary", time: { created: 1000 } };
   await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
     yield* integrate(f.ctx, f.options);
     yield* f.rpc().set({ sessionID: f.sessionID, on: false });
@@ -290,7 +290,7 @@ test("off, vanilla compaction, and on proceed after restart without discovery or
 });
 
 test("checkpoint cuts and chat open failures fail with a user-facing message", async () => {
-  const f = fixture([user("msg_new"), { type: "compaction", id: "msg_cp", status: "completed", reason: "auto", summary: "summary", recent: "", time: { created: 1000 } }]);
+  const f = fixture([user("msg_new"), { type: "compaction", id: "msg_cp", status: "completed", reason: "auto", summary: "summary", time: { created: 1000 } }]);
   await expect(Effect.runPromise(Effect.scoped(Effect.gen(function* () {
     yield* integrate(f.ctx, f.options);
     yield* f.hooks.get("context")!(f.event());
@@ -389,7 +389,7 @@ test("an undone turn is dropped from memory before the next turn, and the redo i
 
 test("an undo before a compaction checkpoint is found in the full message list", async () => {
   const reply = (id: string, text: string): Row => ({ type: "assistant", id, content: [{ type: "text", text }], agent: "build", model: { id: "model", providerID: "anthropic" }, time: { created: 1001 } });
-  const checkpoint: Row = { type: "compaction", id: "msg_cp", status: "completed", reason: "auto", summary: "UniiChat is on; native compaction is skipped.", recent: "", time: { created: 1002 } };
+  const checkpoint: Row = { type: "compaction", id: "msg_cp", status: "completed", reason: "auto", summary: "UniiChat is on; native compaction is skipped.", time: { created: 1002 } };
   const f = fixture([user("msg_a")]);
   await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
     yield* integrate(f.ctx, f.options);
@@ -408,7 +408,7 @@ test("an undo before a compaction checkpoint is found in the full message list",
 
 test("a UniiChat compaction stub mid-turn: the turn is rebuilt from the full message list", async () => {
   const reply = (id: string, text: string): Row => ({ type: "assistant", id, content: [{ type: "text", text }], agent: "build", model: { id: "model", providerID: "anthropic" }, time: { created: 1001 } });
-  const stub: Row = { type: "compaction", id: "msg_stub", status: "completed", reason: "auto", summary: "UniiChat is on; native compaction is skipped.", recent: "task\nstep 1", metadata: { uniichat: "skipped" }, time: { created: 1002 } };
+  const stub: Row = { type: "compaction", id: "msg_stub", status: "completed", reason: "auto", summary: "UniiChat is on; native compaction is skipped.", metadata: { uniichat: "skipped" }, time: { created: 1002 } };
   const f = fixture([user("msg_old"), idle("msg_idle"), user("msg_new")]);
   await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
     yield* integrate(f.ctx, f.options);
@@ -460,4 +460,12 @@ test("/btw gets Unii's prompt and memory instead of the whole session; off or ch
     expect(off.system[0]!.text).toBe("vanilla");
     expect(off.messages).toHaveLength(2);
   })));
+});
+
+test("a row our schema copy rejects still reaches the log as a wire row", () => {
+  const decoded = Schema.decodeUnknownSync(SessionMessage.Info)(user("msg_u", "hi"));
+  expect(toWire(decoded)).toEqual(user("msg_u", "hi"));
+  // A newer OpenCode row: a compaction from a schema with an extra required key we lack, and a missing one.
+  const newer = { type: "compaction", id: "msg_cp", status: "completed", reason: "auto", time: { created: DateTime.makeUnsafe(1000) }, future: { at: DateTime.makeUnsafe(2000) } };
+  expect(toWire(newer as unknown as SessionMessage.Info)).toEqual({ type: "compaction", id: "msg_cp", status: "completed", reason: "auto", time: { created: 1000 }, future: { at: 2000 } } as unknown as Row);
 });
