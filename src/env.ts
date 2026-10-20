@@ -45,7 +45,7 @@ function* ancestors(start: string, stop?: string): Generator<string> {
 
 const ioError = (error: unknown): Error => error instanceof Error ? error : new Error(String(error));
 
-export function agentsMd(input: LocationInput & { configDirectory?: string; home?: string }): Effect.Effect<string | undefined, Error> {
+export function agentsMd(input: LocationInput & { configDirectory?: string; home?: string; paths?: readonly string[] }): Effect.Effect<string | undefined, Error> {
   return Effect.try({
     try: () => {
       const start = canonical(input.directory);
@@ -60,6 +60,7 @@ export function agentsMd(input: LocationInput & { configDirectory?: string; home
           if (isFile(file)) files.add(file);
         }
       }
+      for (const file of input.paths ?? []) if (isFile(file)) files.add(canonical(file));
       const rendered = [...files].map((file) => `Instructions from: ${file}\n${readFileSync(file, "utf8")}`);
       return rendered.length ? rendered.join("\n\n") : undefined;
     },

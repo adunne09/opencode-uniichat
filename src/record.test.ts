@@ -1,7 +1,28 @@
 import { describe, expect, test } from "bun:test";
-import { clipEcho, cutUtf8, echoText, fileLine, formatDate, formatISODate, splitText, toolText, utf8Size } from "./record.ts";
+import { clipEcho, cutUtf8, echoText, fileLine, formatDate, formatISODate, page, splitText, toolText, utf8Size } from "./record.ts";
 
 describe("record text", () => {
+  test("zoom continuation offsets reconstruct Unicode text without loss", () => {
+    for (const text of ["a".repeat(29999) + "🙂" + "b".repeat(30001), "猫🙂\n".repeat(20000)]) {
+      let at = 0, joined = "";
+      for (;;) {
+        const result = page(text, at);
+        const next = /\n\[characters (\d+)-(\d+) of (\d+); go on with at (\d+)\]$/.exec(result);
+        const body = next ? result.slice(0, next.index) : result;
+        expect(body.isWellFormed()).toBe(true);
+        expect(body.length).toBeLessThanOrEqual(30000);
+        joined += body;
+        if (!next) break;
+        expect(Number(next[1])).toBe(at + 1);
+        expect(Number(next[3])).toBe(text.length);
+        expect(Number(next[4])).toBeGreaterThan(at);
+        at = Number(next[4]);
+      }
+      expect(joined).toBe(text);
+      expect(page(text, text.length + 1)).toBe("");
+    }
+    for (const at of [-1, 0.1, NaN, Infinity]) expect(() => page("x", at)).toThrow(RangeError);
+  });
   test("measures and cuts UTF-8 without splitting code points", () => {
     expect(utf8Size("aé中😀")).toBe(10);
     const prefixes = ["", "a", "a", "aé", "aé", "aé", "aé中", "aé中", "aé中", "aé中", "aé中😀"];

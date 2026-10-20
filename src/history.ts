@@ -1,7 +1,7 @@
 import type { Schema } from "effect";
 import type { SessionMessage } from "@opencode/schema/session-message";
 import type { ContentPart, Message, SystemPart } from "@opencode/ai";
-import { failureNote } from "./prompts.ts";
+import { failureNote, TURN_HEAD } from "./prompts.ts";
 import { echoText, toolResultSrc, toolText, type Kind } from "./record.ts";
 
 export type Row = Schema.Codec.Encoded<typeof SessionMessage.Info>;
@@ -80,6 +80,13 @@ export function items(rows: readonly Row[], opts: { name: (childID: string) => s
       result.push({ kind: "work", text: `[${opts.name(row.metadata.childID)}] ${subagentReport(row.text)}`, date, src: row.id });
       continue;
     }
+    if (row.type === "shell") {
+      if (row.status !== "running") result.push({
+        kind: "echo", date: row.time.completed ?? date, src: row.id,
+        text: `$ ${row.command}\n[${row.status}${row.exit === undefined ? "" : `; exit ${row.exit}`}]\n${row.output?.output ?? ""}${row.output?.truncated ? "\n[OpenCode shell output truncated]" : ""}`,
+      });
+      continue;
+    }
     if (row.type !== "assistant") continue;
     row.content.forEach((part, index) => {
       if (part.type === "text" && part.text !== "") {
@@ -153,7 +160,7 @@ export function stubCut(rows: readonly Row[]): boolean {
 export function buildRequest(input: RequestInput): RequestMessage[] {
   const start = input.child ? 0 : input.messages.findIndex((message) => message.id !== undefined && input.turnIds.has(message.id));
   if (start < 0) throw new Error("UniiChat turn cut by an OpenCode compaction checkpoint; the current raw turn is no longer available.");
-  const messages = input.messages.slice(start).filter((message) => message.role !== "system").map((message): RequestMessage => {
+  const messages = input.messages.slice(start).map((message): RequestMessage => {
     const report = message.id === undefined ? undefined : input.reports.get(message.id);
     const content: readonly ContentPart[] = report === undefined ? message.content : [{ type: "text", text: report }];
     return {
@@ -165,6 +172,20 @@ export function buildRequest(input: RequestInput): RequestMessage[] {
       }),
     };
   });
+  // Keep the latest instruction-source notices from before the raw turn as well.
+  const lead = input.messages.slice(0, start).filter((message) => message.role === "system");
+  const sources = new Map<string, number>();
+  lead.forEach((message, i) => {
+    const keys = message.metadata?.instructionSources;
+    for (const key of Array.isArray(keys) ? keys : [message.id ?? `notice-${i}`]) if (typeof key === "string") sources.set(key, i);
+  });
+  const keep = new Set(sources.values());
+  const user = messages.findIndex((message) => message.role !== "system");
+  if (!input.child && messages[user]?.role === "user") {
+    const first = messages[user]!;
+    const headed = first.content.some((part) => part.type === "text" && part.text.startsWith(TURN_HEAD));
+    if (!headed) messages[user] = { ...first, content: [{ type: "text", text: TURN_HEAD }, ...first.content] };
+  }
   const prefix: ContentPart[] = input.view.blocks.map((text, index) => ({
     type: "text",
     text,
@@ -172,7 +193,7 @@ export function buildRequest(input: RequestInput): RequestMessage[] {
   }));
   prefix.push({ type: "text", text: input.view.tail });
   if (!input.child && input.state !== undefined) prefix.push({ type: "text", text: input.state });
-  if (messages[0]?.role === "user") messages[0] = { ...messages[0], content: [...prefix, ...messages[0].content] };
+  if (messages[user]?.role === "user") messages[user] = { ...messages[user]!, content: [...prefix, ...messages[user]!.content] };
   else messages.unshift({ role: "user", content: prefix });
   const last = messages[messages.length - 1]!;
   for (let i = last.content.length - 1; i >= 0; i--) {
@@ -184,7 +205,7 @@ export function buildRequest(input: RequestInput): RequestMessage[] {
     };
     break;
   }
-  return messages;
+  return [...lead.filter((_, i) => keep.has(i)), ...messages];
 }
 
 // A /btw request: the view, the raw turn still in progress (if any), then the question.
@@ -225,4 +246,17 @@ export function extractSkills(systemParts: readonly (SystemPart | string)[]): st
     if (match) return match[1];
   }
   return undefined;
+}
+
+/** Paths actually loaded by OpenCode, including subfolder instruction notices. */
+export function instructionPaths(rows: readonly Row[], system: readonly SystemPart[]): string[] {
+  const paths = new Set<string>();
+  const scan = (text: string) => { for (const match of text.matchAll(/^Instructions from: (.+)$/gm)) paths.add(match[1]!.trim()); };
+  system.forEach((part) => scan(part.text));
+  for (const row of rows) {
+    if (row.type === "system" || row.type === "synthetic" && row.metadata?.instruction) scan(row.text);
+    const instruction = row.metadata?.instruction as { paths?: unknown } | undefined;
+    if (Array.isArray(instruction?.paths)) for (const path of instruction.paths) if (typeof path === "string") paths.add(path);
+  }
+  return [...paths];
 }

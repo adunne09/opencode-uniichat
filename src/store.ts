@@ -6,6 +6,7 @@ import { Data, Effect } from "effect";
 import type { LogRecord } from "./record.ts";
 import { last, type Ref } from "./tree.ts";
 import { serializeBatch } from "./view.ts";
+import { Archive, lines } from "./archive.ts";
 
 export class StoreError extends Data.TaggedError("StoreError")<{
   op: string;
@@ -43,14 +44,14 @@ function day(date: Date): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
-function writeAll(fd: number, data: Uint8Array): void {
+function writeAll(fd: number, data: Uint8Array, sync = true): void {
   let offset = 0;
   while (offset < data.length) {
     const written = fs.writeSync(fd, data, offset, data.length - offset);
     if (written === 0) throw new Error("Write made no progress");
     offset += written;
   }
-  fs.fsyncSync(fd);
+  if (sync) fs.fsyncSync(fd);
 }
 
 function atomic(path: string, text: string): void {
@@ -155,6 +156,7 @@ function optional(path: string): string | undefined {
 }
 
 export class Store {
+  private archive?: Archive;
   private constructor(readonly dir: string) {}
 
   static open(dir: string): Effect.Effect<Store, StoreError> {
@@ -201,12 +203,39 @@ export class Store {
     });
   }
 
+  /** Runtime load reads snapshots and indexed addresses, never the full JSONL bodies. */
+  indexed() {
+    return attempt("index", this.dir, () => {
+      recoverSnapshot(this.dir);
+      this.archive ??= new Archive(this.dir);
+      const json = (file: string): unknown => {
+        const text = optional(join(this.dir, file));
+        if (text === undefined) return;
+        try { return JSON.parse(text); } catch { return; }
+      };
+      const refs = (value: unknown): Ref[] | undefined => Array.isArray(value) && value.every((ref) =>
+        Array.isArray(ref) && ref.length === 2 && ref.every((n) => Number.isSafeInteger(n) && n >= 0) && ref[0] <= 52) ? value : undefined;
+      const batch = json("view-batch.json") as Partial<Batch> | null | undefined;
+      return { archive: this.archive, view: refs(json("view.json")), compView: refs(json("compaction-view.json")),
+        batch: serializeBatch(batch?.chat === true, batch?.compaction === true), system: optional(join(this.dir, "system.txt")) };
+    });
+  }
+  close() { this.archive?.close(); }
+
   appendRecord(rec: LogRecord): Effect.Effect<void, StoreError> {
-    return attempt("appendRecord", join(this.dir, "main"), () => append(join(this.dir, "main", `${day(new Date(rec.date))}.jsonl`), rec));
+    return attempt("appendRecord", join(this.dir, "main"), () => {
+      const path = `main/${day(new Date(rec.date))}.jsonl`;
+      append(join(this.dir, path), rec);
+      this.archive?.appended(path);
+    });
   }
 
   appendNode(node: StoredNode): Effect.Effect<void, StoreError> {
-    return attempt("appendNode", join(this.dir, "tree"), () => append(join(this.dir, "tree", `${day(new Date())}.jsonl`), node));
+    return attempt("appendNode", join(this.dir, "tree"), () => {
+      const path = `tree/${day(new Date())}.jsonl`;
+      append(join(this.dir, path), node);
+      this.archive?.appended(path);
+    });
   }
 
   saveViews(chat: readonly Ref[], comp: readonly Ref[], batch: Batch): Effect.Effect<void, StoreError> {
@@ -231,17 +260,24 @@ export class Store {
         const dir = join(this.dir, name);
         for (const file of fs.readdirSync(dir).filter((s) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(s)).sort()) {
           const path = join(dir, file);
-          const keep: string[] = [];
-          const gone: string[] = [];
-          for (const line of fs.readFileSync(path, "utf8").split("\n")) {
-            if (line === "") continue;
-            let value: unknown;
-            try { value = JSON.parse(line); } catch { keep.push(line); continue; }
-            (drop(value) ? gone : keep).push(line);
-          }
-          if (!gone.length) continue;
-          append(join(archive, `${name}.jsonl`), undefined, gone.join("\n"));
-          atomic(path, keep.map((line) => `${line}\n`).join(""));
+          const temp = `${path}.${randomUUID()}.tmp`;
+          const fd = fs.openSync(temp, "wx", 0o600);
+          let changed = false;
+          try {
+            for (const { data } of lines(path)) {
+              if (!data.length) continue;
+              const line = data.toString("utf8");
+              let value: unknown;
+              try { value = JSON.parse(line); } catch { /* Preserve damaged records for recovery. */ }
+              if (value !== undefined && drop(value)) {
+                append(join(archive, `${name}.jsonl`), undefined, line);
+                changed = true;
+              } else writeAll(fd, Buffer.from(`${line}\n`), false);
+            }
+            fs.fsyncSync(fd);
+          } finally { fs.closeSync(fd); }
+          if (changed) { fs.renameSync(temp, path); syncDir(dir); }
+          else fs.unlinkSync(temp);
         }
       };
       cut("tree", (node: StoredNode) => last(node.l, node.i) >= k);
@@ -251,6 +287,7 @@ export class Store {
       }
       snapshot(this.dir, [JSON.stringify(chat), JSON.stringify(comp), JSON.stringify(serializeBatch(batch.chat, batch.compaction))]);
       cut("main", (rec: LogRecord) => rec.i >= k);
+      this.archive?.refresh();
     });
   }
 
@@ -265,6 +302,7 @@ export class Store {
     return attempt("appendAgent", join(this.dir, "agents"), () => {
       safeName(name);
       append(join(this.dir, "agents", `${name}.jsonl`), rec);
+      this.archive?.appended(`agents/${name}.jsonl`);
     });
   }
 

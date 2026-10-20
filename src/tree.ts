@@ -38,6 +38,7 @@ export const leafText = (kind: string, text: string) => {
 };
 
 export const mergeText = (a: string, b: string) => {
-  const value = `${a}\n${b}`;
+  const flat = (text: string) => text.replace(/\s*\n\s*/g, " ");
+  const value = `${flat(a)}\n${flat(b)}`;
   return utf8Size(value) <= NODE_LIMIT ? value : undefined;
 };

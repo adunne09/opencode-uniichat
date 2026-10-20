@@ -1,11 +1,13 @@
-import { Cause, Data, Deferred, Effect, Exit, Semaphore } from "effect";
+import { Cause, Data, Deferred, Effect, Exit, Fiber, Semaphore } from "effect";
 import type * as compactor from "./compactor.ts";
 import * as record from "./record.ts";
 import * as tree from "./tree.ts";
 import * as view from "./view.ts";
 import * as prompts from "./prompts.ts";
-import { WorkQueue, isPrefix } from "./queue.ts";
-import { Store, chatDir, type Loaded, type StoreError } from "./store.ts";
+import { WorkQueue } from "./queue.ts";
+import { Store, chatDir, type StoreError } from "./store.ts";
+import { Archive } from "./archive.ts";
+import { DEFAULT_ENGINE, type EngineSettings } from "./settings.ts";
 
 export interface Item {
   kind: record.Kind;
@@ -16,6 +18,7 @@ export interface Item {
 }
 export interface Deps {
   compact: (input: compactor.Input) => Effect.Effect<compactor.Output, unknown>;
+  settings?: EngineSettings;
 }
 export class ChatError extends Data.TaggedError("ChatError")<{ message: string }> {}
 export interface ToolResult {
@@ -27,7 +30,7 @@ type Usage = { calls: number; ms: number };
 const emptyUsage = (): Usage => ({ calls: 0, ms: 0 });
 // A compaction call that hangs (no response, stalled stream) must not block awaitSummarized forever.
 // `tries` bounds the recipe's "Too long" loop. Both are set from the plugin options.
-export const COMPACTION = { timeoutMs: 4 * 60_000, tries: 5 };
+export const COMPACTION = Object.freeze({ timeoutMs: DEFAULT_ENGINE.timeoutMs, tries: DEFAULT_ENGINE.tries });
 const key = (ref: tree.Ref) => `${ref[0]}:${ref[1]}`;
 function extension(mime: string): string {
   const type = mime.split(";")[0]!.trim().toLowerCase();
@@ -37,72 +40,62 @@ function extension(mime: string): string {
 
 export class Chat {
   private readonly mutex = Semaphore.makeUnsafe(1);
-  private readonly records = new Map<number, record.LogRecord>();
-  private readonly src = new Map<string, number>();
-  private readonly agentSrc = new Map<string, Map<string, number>>();
-  private readonly texts = new Map<string, string>();
+  private readonly archive: Archive;
+  private readonly settings: EngineSettings;
   private readonly unpersisted = new Map<string, { ref: tree.Ref; text: string }>();
-  private readonly agents: Map<string, record.LogRecord[]>;
-  private readonly names = new Map<string, string>();
   private queue: WorkQueue;
   // Rewind points, one per epoch; a build started in an older epoch is dropped if it covers one.
   private readonly cuts: number[] = [];
   private chat: view.View;
   private comp: view.View;
   private systemText: string | undefined;
-  private tools: compactor.Input["tools"] | undefined;
+  private toolsReady = false;
   private changed = Deferred.makeUnsafe<void>();
-  private readonly writes = new Set<{ lines: string[]; started: Deferred.Deferred<void> }>();
+  private readonly fibers = new Set<Fiber.Fiber<void>>();
+  private closed = false;
   private last: { ms: number } | undefined;
   private total = emptyUsage();
   private lastError: string | undefined;
   private T: number;
   private pending: number;
-  private readonly lookup: view.Lookup = (l, i) => this.texts.get(key([l, i]));
+  private snapshot: string | undefined;
+  private readonly lookup: view.Lookup = (l, i) => this.unpersisted.has(key([l, i])) ? undefined : this.archive.node(l, i);
 
-  private constructor(private readonly store: Store, private readonly deps: Deps, loaded: Loaded) {
-    for (const rec of loaded.records) {
-      this.records.set(rec.i, rec);
-      if (!this.src.has(rec.src)) this.src.set(rec.src, rec.i);
-    }
-    this.T = loaded.records.length ? loaded.records.at(-1)!.i + 1 : 0;
-    for (const node of loaded.nodes) this.texts.set(key([node.l, node.i]), node.text);
-    this.queue = WorkQueue.restore(this.T, loaded.nodes.map((node) => [node.l, node.i]));
-    this.pending = this.T - new Set(loaded.nodes.filter((node) => node.l === 0).map((node) => node.i)).size;
-    this.chat = view.createView(loaded.view ?? [], loaded.batch.chat, this.lookup);
-    this.comp = view.createView(loaded.compView ?? [], loaded.batch.compaction, this.lookup);
+  private constructor(private readonly store: Store, private readonly deps: Deps, loaded: {
+    archive: Archive; view?: tree.Ref[]; compView?: tree.Ref[]; batch: { chat: boolean; compaction: boolean }; system?: string;
+  }) {
+    this.archive = loaded.archive;
+    this.settings = structuredClone(deps.settings ?? DEFAULT_ENGINE);
+    this.T = this.archive.count();
+    this.queue = this.makeQueue();
+    this.pending = this.archive.pending();
+    this.chat = view.createView(view.restore(this.T, loaded.view, this.lookup), loaded.batch.chat, this.lookup);
+    this.comp = view.createView(view.restore(this.queue.first, loaded.compView, this.lookup), loaded.batch.compaction, this.lookup);
     this.systemText = loaded.system;
-    this.agents = loaded.agents;
-    for (const [name, records] of this.agents) {
-      this.agentSrc.set(name, new Map(records.map((rec) => [rec.src, rec.i])));
-      const child = records[0]?.src.split(":")[0];
-      if (child) this.names.set(child, name);
-    }
+  }
+
+  private makeQueue() {
+    return new WorkQueue(this.T, [], this.settings.concurrency, {
+      has: (ref) => !this.unpersisted.has(key(ref)) && this.archive.has(ref),
+      missing: (from, limit) => [...new Set([
+        ...this.archive.missing(from, limit),
+        ...[...this.unpersisted.values()].filter(({ ref }) => ref[0] === 0 && ref[1] >= from).map(({ ref }) => ref[1]),
+      ])].sort((a, b) => a - b).slice(0, limit),
+      ready: (end, limit) => this.archive.ready(end, limit),
+    });
   }
 
   static open = Effect.fn("Chat.open")(function* (dir: string, deps: Deps): Effect.fn.Return<Chat, StoreError> {
     const store = yield* Store.open(dir);
-    const chat = new Chat(store, deps, yield* store.load());
-    yield* chat.recoverViews();
-    return chat;
+    return yield* Effect.gen(function* () {
+      const chat = new Chat(store, deps, yield* store.indexed());
+      yield* chat.recoverViews();
+      return chat;
+    }).pipe(Effect.onExit((exit) => Exit.isFailure(exit) ? Effect.sync(() => store.close()) : Effect.void));
   });
 
   private recoverViews() {
-    const self = this;
-    return Effect.gen(function* () {
-      const end = (v: view.View) => v.lines.length ? tree.last(...v.lines.at(-1)!) + 1 : 0;
-      const chatEnd = end(self.chat);
-      const compEnd = end(self.comp);
-      if (chatEnd === self.T && compEnd === self.T) return;
-      // Replay only missing appends. Keep the saved prefix unchanged.
-      if (chatEnd === compEnd) {
-        for (let T = chatEnd + 1; T <= self.T; T++) view.step(self.chat, self.comp, T, self.lookup);
-      } else {
-        for (let T = chatEnd + 1; T <= self.T; T++) view.append(self.chat, T, self.lookup);
-        for (let T = compEnd + 1; T <= self.T; T++) view.append(self.comp, T, self.lookup, view.COMPACTION_BUDGET);
-      }
-      yield* self.saveViews();
-    });
+    return this.maintain();
   }
 
   private notify() {
@@ -111,19 +104,24 @@ export class Chat {
     return Deferred.succeed(old, undefined);
   }
 
-  private refreshSizes() {
-    this.chat = view.createView(this.chat.lines, this.chat.pending, this.lookup);
-    this.comp = view.createView(this.comp.lines, this.comp.pending, this.lookup);
+  private maintain(next = false) {
+    view.step(this.chat, this.comp, this.T, this.lookup, this.queue.first, this.settings.chat, this.settings.compaction, next);
+    return this.saveViews();
   }
 
   private saveViews() {
-    return this.store.saveViews(view.serialize(this.chat), view.serialize(this.comp), { chat: this.chat.pending, compaction: this.comp.pending });
+    const chat = view.serialize(this.chat), comp = view.serialize(this.comp);
+    const batch = { chat: this.chat.pending, compaction: this.comp.pending };
+    const snapshot = JSON.stringify([chat, comp, batch]);
+    if (snapshot === this.snapshot) return Effect.void;
+    return this.store.saveViews(chat, comp, batch).pipe(Effect.tap(() => Effect.sync(() => { this.snapshot = snapshot; })));
   }
 
-  private pages(item: Item, src: ReadonlyMap<string, number>, filePrefix = "") {
+  private pages(item: Item, filePrefix = "") {
     const self = this;
     return Effect.gen(function* () {
-      const first = src.get(item.src) ?? src.get(`${item.src}:0`) ?? (filePrefix ? self.agents.get(filePrefix)!.length : self.T);
+      const scope = filePrefix ? `agent:${filePrefix}` : "main";
+      const first = self.archive.source(item.src, scope) ?? self.archive.source(`${item.src}:0`, scope) ?? self.archive.count(scope);
       let text = item.text;
       for (const [k, file] of (item.files ?? []).entries()) {
         let path: string | undefined;
@@ -149,23 +147,21 @@ export class Chat {
     });
   }
 
-  log(items: readonly Item[]) {
+  log(items: readonly Item[]): Effect.Effect<void, ChatError | StoreError> {
     const self = this;
     return this.mutex.withPermits(1)(Effect.gen(function* () {
+      if (self.closed) return yield* Effect.fail(new ChatError({ message: "Chat closed" }));
       for (const item of items) {
-        if (item.kind === "echo" && self.src.has(item.src)) continue;
-        const pages = yield* self.pages(item, self.src);
+        if (item.kind === "echo" && self.archive.source(item.src) !== undefined) continue;
+        const pages = yield* self.pages(item);
         for (const page of pages) {
-          if (self.src.has(page.src)) continue;
+          if (self.archive.source(page.src) !== undefined) continue;
           const rec = { ...page, i: self.T };
           yield* self.store.appendRecord(rec);
-          self.records.set(rec.i, rec);
-          self.src.set(rec.src, rec.i);
           self.T++;
           self.pending++;
           self.queue.append(self.T);
-          view.step(self.chat, self.comp, self.T, self.lookup);
-          yield* self.saveViews();
+          yield* self.maintain(true);
           self.queue.retryFailed();
           yield* self.pump();
         }
@@ -176,11 +172,10 @@ export class Chat {
   private persist(ref: tree.Ref, text: string) {
     const self = this;
     return Effect.gen(function* () {
-      if (self.texts.has(key(ref))) return;
+      if (self.lookup(...ref) !== undefined) return;
       text = self.unpersisted.get(key(ref))?.text ?? text;
       self.unpersisted.set(key(ref), { ref, text });
       yield* self.store.appendNode({ l: ref[0], i: ref[1], text, size: record.utf8Size(text) });
-      self.texts.set(key(ref), text);
       self.unpersisted.delete(key(ref));
       if (ref[0] === 0) self.pending--;
     });
@@ -190,22 +185,22 @@ export class Chat {
   private pump(retryWrites = true): Effect.Effect<void, StoreError> {
     const self = this;
     return Effect.gen(function* () {
-      if (self.systemText === undefined || self.tools === undefined) return;
+      if (self.closed || self.systemText === undefined) return;
       if (retryWrites) {
         for (const { ref, text } of self.unpersisted.values()) {
           const saved = yield* self.persist(ref, text).pipe(Effect.exit);
           if (Exit.isSuccess(saved)) self.queue.built(ref);
           else self.lastError = Cause.pretty(saved.cause);
         }
-        self.refreshSizes();
+        yield* self.maintain();
         yield* self.notify();
       }
       const starts: tree.Ref[] = [];
       while (true) {
         const work = self.queue.drain((ref) => {
-          const rec = ref[0] === 0 ? self.records.get(ref[1])! : undefined;
+          const rec = ref[0] === 0 ? self.archive.record(ref[1])! : undefined;
           return rec ? tree.leafText(rec.kind, rec.text) : tree.mergeText(...tree.children(ref).map((child) => self.lookup(...child)!) as [string, string]);
-        }, 8 - self.queue.inFlight.size);
+        }, self.settings.concurrency - self.queue.inFlight.size);
         starts.push(...work.start);
         for (const [ref, text] of work.instant) self.unpersisted.set(key(ref), { ref, text });
         for (const [at, [ref, text]] of work.instant.entries()) {
@@ -214,33 +209,37 @@ export class Chat {
             for (const [pending] of work.instant.slice(at)) self.queue.failed(pending);
             for (const pending of starts) self.queue.failed(pending);
             self.lastError = Cause.pretty(saved.cause);
-            self.refreshSizes();
+            yield* self.maintain();
             yield* self.notify();
             return;
           }
           self.queue.built(ref);
         }
         if (!work.instant.length) break;
-        self.refreshSizes();
+        yield* self.maintain();
         yield* self.notify();
       }
-      for (const ref of starts) yield* Effect.forkDetach(self.build(ref));
+      for (const ref of starts) {
+        const fiber = yield* Effect.forkDetach(Effect.interruptible(self.build(ref)));
+        self.fibers.add(fiber);
+        fiber.addObserver(() => self.fibers.delete(fiber));
+      }
     }).pipe(Effect.uninterruptible);
   }
 
   private task(ref: tree.Ref) {
     if (ref[0] === 0) {
-      const rec = this.records.get(ref[1])!;
+      const rec = this.archive.record(ref[1])!;
       return prompts.leafTask(rec.i, rec.kind, rec.text);
     }
     const [a, b] = tree.children(ref);
-    return prompts.mergeTask(tree.name(...a), tree.name(...b), tree.first(...ref), tree.last(...ref), view.renderLine(a, this.lookup(...a)), view.renderLine(b, this.lookup(...b)));
+    return prompts.mergeTask(tree.name(...a), tree.name(...b), tree.first(...ref), tree.last(...ref), view.flat(this.lookup(...a)!), view.flat(this.lookup(...b)!));
   }
 
   // A node's source as one line, cut to the node limit: the line of a compaction that returned none.
   private clippedSource(ref: tree.Ref) {
     const source = ref[0] === 0
-      ? `${this.records.get(ref[1])!.kind}: ${this.records.get(ref[1])!.text}`
+      ? `${this.archive.record(ref[1])!.kind}: ${this.archive.record(ref[1])!.text}`
       : tree.children(ref).map((child) => this.lookup(...child)!).join("\n");
     return record.cutUtf8(source.replace(/\s*(\r\n|\r|\n)\s*/g, " "), tree.NODE_LIMIT);
   }
@@ -248,42 +247,23 @@ export class Chat {
   private compact(ref: tree.Ref): Effect.Effect<string, unknown> {
     const self = this;
     return Effect.gen(function* () {
-      const started = yield* Deferred.make<void>();
-      let rendered: ReturnType<typeof view.blocks>;
-      let registration: { lines: string[]; started: Deferred.Deferred<void> };
-      while (true) {
-        const lines = view.contextFor(self.comp, ref, self.lookup).map((r) => view.renderLine(r, self.lookup(...r)));
-        rendered = view.blocks(lines);
-        const markLines = lines.slice(0, rendered.blocks.length * 4);
-        const blocker = [...self.writes].find((write) => !Deferred.isDoneUnsafe(write.started) && isPrefix(write.lines, markLines));
-        if (blocker) {
-          yield* Deferred.await(blocker.started);
-          continue;
-        }
-        // Do not yield between the prefix check and registration.
-        registration = { lines: markLines, started };
-        self.writes.add(registration);
-        break;
-      }
+      const rendered = view.blocks(view.contextFor(self.comp, ref, self.lookup).map((r) => view.renderLine(r, self.lookup(...r))));
       const system = self.systemText!;
-      const tools = self.tools!;
       const first: { role: "user"; parts: { text: string; cache?: boolean }[] } = { role: "user", parts: [
         ...rendered.blocks.map((text, i) => ({ text, ...(i === rendered.blocks.length - 1 ? { cache: true } : {}) })),
-        { text: rendered.tail }, { text: self.task(ref), cache: true },
+        { text: rendered.tail }, { text: self.task(ref) },
       ] };
       let turns: compactor.Input["turns"] = [first];
       return yield* Effect.gen(function* () {
         let shortest: string | undefined;
-        for (let attempt = 0; attempt < COMPACTION.tries; attempt++) {
-          const result = yield* self.deps.compact({ system, tools, turns, ...(attempt === 0 ? { started } : {}) }).pipe(
+        for (let attempt = 0; attempt < self.settings.tries; attempt++) {
+          const result = yield* self.deps.compact({ system, tools: [], turns }).pipe(
             Effect.timeoutOrElse({
-              duration: COMPACTION.timeoutMs,
-              orElse: () => Effect.fail(new ChatError({ message: `Compaction call timed out after ${COMPACTION.timeoutMs / 1000}s` })),
+              duration: self.settings.timeoutMs,
+              orElse: () => Effect.fail(new ChatError({ message: `Compaction call timed out after ${self.settings.timeoutMs / 1000}s` })),
             }),
             Effect.exit,
           );
-          // Release the wait even when a test adapter or failed transport has no headers.
-          if (attempt === 0) yield* Deferred.succeed(started, undefined);
           if (Exit.isFailure(result)) {
             if (shortest !== undefined) return shortest;
             return yield* Effect.failCause(result.cause);
@@ -302,15 +282,12 @@ export class Chat {
           }
           if (shortest === undefined || record.utf8Size(line) < record.utf8Size(shortest)) shortest = line;
           if (record.utf8Size(line) <= 512) return line;
-          if (attempt === COMPACTION.tries - 1) break;
+          if (attempt === self.settings.tries - 1) break;
           // A retry resends the first request plus a note on the last line only: never a try's words.
           turns = [{ role: "user", parts: [...first.parts, { text: prompts.tooLong(record.utf8Size(line), record.cutUtf8(line, 512)) }] }];
         }
         return shortest!;
-      }).pipe(Effect.ensuring(Effect.gen(function* () {
-        self.writes.delete(registration);
-        yield* Deferred.succeed(started, undefined);
-      })));
+      });
     });
   }
 
@@ -321,6 +298,7 @@ export class Chat {
       const retained = self.unpersisted.get(key(ref));
       const result = yield* (retained ? Effect.succeed(retained.text) : self.compact(ref)).pipe(Effect.exit);
       yield* self.mutex.withPermits(1)(Effect.gen(function* () {
+        if (self.closed) return;
         if (self.cuts.slice(epoch).some((k) => tree.last(...ref) >= k)) {
           // The records this node summarized were undone while it was being built.
           yield* self.notify();
@@ -329,7 +307,7 @@ export class Chat {
         const saved = Exit.isSuccess(result) ? yield* self.persist(ref, result.value).pipe(Effect.exit) : result;
         if (Exit.isSuccess(saved)) {
           self.queue.built(ref);
-          self.refreshSizes();
+          yield* self.maintain();
           // A retried node succeeded: the error no longer describes the chat's state.
           if (self.queue.failedNodes.size === 0) self.lastError = undefined;
         } else {
@@ -339,11 +317,11 @@ export class Chat {
         yield* self.notify();
         // Other ready work must not wait for a failed node's retry.
         yield* self.pump(false);
-      }));
+      }).pipe(Effect.uninterruptible));
     }).pipe(Effect.catchCause((cause) => Effect.gen(function* () {
       self.lastError = Cause.pretty(cause);
       yield* self.notify();
-    })), Effect.uninterruptible);
+    })));
   }
 
   // The first record whose message is gone from the session after an undo (the log tail whose
@@ -351,12 +329,12 @@ export class Chat {
   // no record is present at all (e.g. the session context starts after a checkpoint).
   // Source base of the latest record, undefined for an empty log.
   latestSource(): string | undefined {
-    return this.T > 0 ? this.records.get(this.T - 1)!.src.split(":")[0]! : undefined;
+    return this.T > 0 ? this.archive.record(this.T - 1)!.src.split(":")[0]! : undefined;
   }
 
   undoneFrom(present: (base: string) => boolean): number | undefined {
     for (let i = this.T - 1; i >= 0; i--) {
-      if (present(this.records.get(i)!.src.split(":")[0]!)) return i + 1 < this.T ? i + 1 : undefined;
+      if (present(this.archive.record(i)!.src.split(":")[0]!)) return i + 1 < this.T ? i + 1 : undefined;
     }
     return undefined;
   }
@@ -368,23 +346,18 @@ export class Chat {
       if (!Number.isSafeInteger(k) || k < 0 || k >= self.T) return [] as string[];
       const chat = view.cut(self.chat.lines, k);
       const comp = view.cut(self.comp.lines, k);
-      yield* self.store.rewind(k, chat, comp, { chat: false, compaction: false });
       const bases = new Set<string>();
       for (let i = k; i < self.T; i++) {
-        const rec = self.records.get(i)!;
+        const rec = self.archive.record(i)!;
         bases.add(rec.src.split(":")[0]!);
-        if (self.src.get(rec.src) === i) self.src.delete(rec.src);
-        self.records.delete(i);
       }
-      for (const [id, node] of [...self.texts.keys()].map((id) => [id, id.split(":").map(Number) as [number, number]] as const)) {
-        if (tree.last(...node) >= k) self.texts.delete(id);
-      }
+      yield* self.store.rewind(k, chat, comp, { chat: false, compaction: false });
+      self.snapshot = undefined;
       for (const [id, { ref }] of [...self.unpersisted]) if (tree.last(...ref) >= k) self.unpersisted.delete(id);
       self.cuts.push(k);
       self.T = k;
-      const built = [...self.texts.keys()].map((id) => id.split(":").map(Number) as unknown as tree.Ref);
-      self.queue = WorkQueue.restore(k, built);
-      self.pending = k - built.filter((ref) => ref[0] === 0).length;
+      self.queue = self.makeQueue();
+      self.pending = self.archive.pending();
       self.chat = view.createView(chat, false, self.lookup);
       self.comp = view.createView(comp, false, self.lookup);
       yield* self.notify();
@@ -392,17 +365,19 @@ export class Chat {
     }).pipe(Effect.uninterruptible));
   }
 
-  awaitSummarized() {
+  awaitSummarized(): Effect.Effect<void, ChatError | StoreError> {
     const self = this;
     return Effect.gen(function* () {
       const T = self.T;
       let delay = 1000;
       yield* self.mutex.withPermits(1)(self.pump());
       while (!self.queue.waitDone(T)) {
+        if (self.closed) return yield* Effect.fail(new ChatError({ message: "Chat closed while waiting for summaries" }));
         const next = self.changed;
         if (self.queue.failedNodes.size) {
           const until = (yield* Effect.clockWith((clock) => clock.currentTimeMillis)) + delay;
           while (!self.queue.waitDone(T) && self.queue.failedNodes.size) {
+            if (self.closed) return yield* Effect.fail(new ChatError({ message: "Chat closed while waiting for summaries" }));
             const notification = self.changed;
             const remaining = until - (yield* Effect.clockWith((clock) => clock.currentTimeMillis));
             if (remaining <= 0) break;
@@ -426,13 +401,14 @@ export class Chat {
     return view.blocks(this.chat.lines.map((ref) => view.renderLine(ref, this.lookup(...ref))));
   }
 
-  zoom(id: number | string, n?: number): Effect.Effect<ToolResult, ChatError | StoreError> {
+  zoom(id: number | string, n = 1, at = 0): Effect.Effect<ToolResult, ChatError | StoreError> {
     const self = this;
     return Effect.gen(function* () {
       if (typeof id === "string") {
-        const records = self.agents.get(id);
-        if (!records) return yield* Effect.fail(new ChatError({ message: `Unknown agent: ${id}` }));
-        return { text: records.map((rec) => `${rec.i}|${rec.kind}: ${rec.text}`).join("\n") };
+        if (/^\d+$/.test(id)) return yield* self.zoom(Number(id), n, at);
+        if (!self.archive.agentExists(id)) return yield* Effect.fail(new ChatError({ message: `Unknown agent: ${id}` }));
+        if (!Number.isSafeInteger(at) || at < 0) return yield* Effect.fail(new ChatError({ message: "at must be a non-negative safe integer" }));
+        return { text: self.archive.agentPage(id, at) };
       }
       const ref = n === undefined ? undefined : tree.parseZoom(n, id);
       if (!ref || tree.last(...ref) >= self.T) {
@@ -440,52 +416,38 @@ export class Chat {
         return yield* Effect.fail(new ChatError({ message: `No line ${id}+${n ?? "?"}: n is a power of 2, id a multiple of n, inside the chat. The tree's roots: ${roots || "none"}.` }));
       }
       if (n !== 1) return { text: tree.children(ref).map((child) => view.renderLine(child, self.lookup(...child))).join("\n") };
-      const rec = self.records.get(id)!;
+      if (!Number.isSafeInteger(at) || at < 0) return yield* Effect.fail(new ChatError({ message: "at must be a non-negative safe integer" }));
+      const rec = self.archive.record(id)!;
       const files: { mime: string; data: Uint8Array }[] = [];
-      for (const match of rec.text.matchAll(/^\[file: .* (\S+) → (files\/[^\]\n]+)\]$/gm)) {
+      for (const match of (at === 0 ? rec.text : "").matchAll(/^\[file: .* (\S+) → (files\/[^\]\n]+)\]$/gm)) {
         files.push({ mime: match[1]!, data: yield* self.store.readFile(match[2]!) });
       }
-      return { text: `${rec.kind}: ${rec.text}`, ...(files.length ? { files } : {}) };
+      return { text: `${id}+0|${rec.kind}: ${record.page(rec.text, at)}`, ...(files.length ? { files } : {}) };
     });
   }
 
   date(id: number): Effect.Effect<ToolResult, ChatError> {
     return Effect.suspend(() => {
-      const rec = Number.isSafeInteger(id) ? this.records.get(id) : undefined;
+      const rec = Number.isSafeInteger(id) ? this.archive.record(id) : undefined;
       return rec ? Effect.succeed({ text: record.formatDate(new Date(rec.date).getTime()) }) : Effect.fail(new ChatError({ message: `Unknown message: ${id}` }));
     });
   }
 
   agentName(childSessionID: string, agentType: string): string {
-    const existing = this.names.get(childSessionID);
-    if (existing) return existing;
-    const recovered = [...this.agents].find(([, records]) => records[0]?.src.startsWith(`${childSessionID}:`));
-    const prefix = `${agentType}-`;
-    let n = 1 + [...this.agents.keys()].filter((name) => name.startsWith(prefix)).length;
-    while (this.agents.has(`${prefix}${n}`)) n++;
-    const name = recovered?.[0] ?? `${prefix}${n}`;
-    this.names.set(childSessionID, name);
-    if (!this.agents.has(name)) {
-      this.agents.set(name, []);
-      this.agentSrc.set(name, new Map());
-    }
-    return name;
+    return this.archive.agentName(childSessionID, agentType);
   }
 
   logAgent(name: string, items: readonly Item[]) {
     const self = this;
     return this.mutex.withPermits(1)(Effect.gen(function* () {
-      if (!self.agents.has(name)) return yield* Effect.fail(new ChatError({ message: `Unknown agent: ${name}` }));
-      const records = self.agents.get(name)!;
-      const src = self.agentSrc.get(name)!;
+      if (!self.archive.agentExists(name)) return yield* Effect.fail(new ChatError({ message: `Unknown agent: ${name}` }));
+      const scope = `agent:${name}`;
       for (const item of items) {
-        if (item.kind === "echo" && src.has(item.src)) continue;
-        for (const page of yield* self.pages(item, src, name)) {
-          if (src.has(page.src)) continue;
-          const rec = { ...page, i: records.length };
+        if (item.kind === "echo" && self.archive.source(item.src, scope) !== undefined) continue;
+        for (const page of yield* self.pages(item, name)) {
+          if (self.archive.source(page.src, scope) !== undefined) continue;
+          const rec = { ...page, i: self.archive.count(scope) };
           yield* self.store.appendAgent(name, rec);
-          records.push(rec);
-          src.set(rec.src, rec.i);
         }
       }
     }).pipe(Effect.uninterruptible));
@@ -494,7 +456,7 @@ export class Chat {
   setSystem(text: string) {
     const self = this;
     return this.mutex.withPermits(1)(Effect.gen(function* () {
-      yield* self.store.saveSystem(text);
+      if (self.systemText !== text) yield* self.store.saveSystem(text);
       self.systemText = text;
       yield* self.pump();
       yield* self.notify();
@@ -506,13 +468,33 @@ export class Chat {
   setTools(snapshot: compactor.Input["tools"]) {
     const self = this;
     return this.mutex.withPermits(1)(Effect.gen(function* () {
-      self.tools = structuredClone(snapshot);
+      self.toolsReady = true;
       yield* self.pump();
       yield* self.notify();
     }).pipe(Effect.uninterruptible));
   }
 
-  hasTools() { return this.tools !== undefined; }
+  hasTools() { return this.toolsReady; }
+  hasSource(base: string) { return this.archive.hasBase(base); }
+  retained() { return this.archive.stats(); }
+  retry() {
+    const self = this;
+    return this.mutex.withPermits(1)(Effect.gen(function* () {
+      self.queue.retryFailed();
+      yield* self.pump();
+    }));
+  }
+  close() {
+    const self = this;
+    return Effect.gen(function* () {
+      yield* self.mutex.withPermits(1)(Effect.gen(function* () {
+        self.closed = true;
+        yield* self.notify();
+      }));
+      yield* Fiber.interruptAll(self.fibers);
+      self.store.close();
+    });
+  }
 
   status() {
     return {
@@ -525,15 +507,18 @@ export class Chat {
   }
 }
 
-const registry = new Map<string, Deferred.Deferred<Chat, StoreError>>();
-export function get(sessionID: string, deps: Deps): Effect.Effect<Chat, StoreError> {
-  return Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
-    let loaded = registry.get(sessionID);
+/** Plugin-owned registry: reload interrupts its calls and releases its indexes. */
+export function registry() {
+  const chats = new Map<string, Deferred.Deferred<Chat, StoreError>>();
+  const get = (sessionID: string, deps: Deps): Effect.Effect<Chat, StoreError> => Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
+    let loaded = chats.get(sessionID);
     if (!loaded) {
       loaded = Deferred.makeUnsafe<Chat, StoreError>();
-      registry.set(sessionID, loaded);
-      yield* Effect.forkDetach(Deferred.complete(loaded, Chat.open(chatDir(sessionID), deps)));
+      chats.set(sessionID, loaded);
+      yield* Deferred.complete(loaded, Chat.open(chatDir(sessionID), deps));
     }
     return yield* restore(Deferred.await(loaded));
   }));
+  const each = (f: (chat: Chat) => Effect.Effect<void, unknown>) => Effect.forEach(chats.values(), (loaded) => Deferred.await(loaded).pipe(Effect.flatMap(f), Effect.ignore), { discard: true });
+  return { get, retry: () => each((chat) => chat.retry()), close: () => each((chat) => chat.close()).pipe(Effect.tap(() => Effect.sync(() => chats.clear()))) };
 }

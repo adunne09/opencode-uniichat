@@ -52,7 +52,8 @@ const WORK = /^work: \[([^\]\s]+)\]/;
 // One screen of the browser: the live view, the two lines a zoom opened, or a whole message.
 type Level =
   | { kind: "list"; title: string; lines: string[]; selected: number }
-  | { kind: "text"; title: string; text: string; agent?: string };
+  | { kind: "text"; title: string; text: string; agent?: string; target: ArchiveTarget; next?: number };
+type ArchiveTarget = ({ id: number; n: number } | { name: string }) & { at?: number };
 
 function Popup(props: { ctx: Context; sessionID: string }) {
   const ctx = props.ctx;
@@ -150,16 +151,18 @@ function Popup(props: { ctx: Context; sessionID: string }) {
     }
   };
 
-  const open = async (title: string, input: { id: number; n: number } | { name: string }) => {
+  const open = async (title: string, input: ArchiveTarget) => {
     if (busy()) return;
     setBusy(true);
     setZoomError(undefined);
     try {
       const text = await rpc.archive({ sessionID: props.sessionID, ...input }, options);
       if (controller.signal.aborted) return;
+      const next = /\n\[characters \d+-\d+ of \d+; go on with at (\d+)\]$/.exec(text);
       const level: Level = "n" in input && input.n > 1
         ? { kind: "list", title, lines: text.split("\n").filter(Boolean), selected: 0 }
-        : { kind: "text", title, text: text || "(empty)", agent: "n" in input ? WORK.exec(text)?.[1] : undefined };
+        : { kind: "text", title, text: text || "(empty)", target: input, next: next ? Number(next[1]) : undefined,
+          agent: "n" in input ? WORK.exec(text.replace(LINE, ""))?.[1] : undefined };
       setStack((levels) => [...levels, level]);
       scroll?.scrollTo(0);
     } catch (cause) {
@@ -177,6 +180,10 @@ function Popup(props: { ctx: Context; sessionID: string }) {
     }
     const match = LINE.exec(level.lines[level.selected] ?? "");
     if (match) void open(`${match[1]}+${match[2]}`, { id: Number(match[1]), n: Number(match[2]) });
+  };
+  const nextPage = () => {
+    const level = current();
+    if (level.kind === "text" && level.next !== undefined) void open(`at ${level.next}`, { ...level.target, at: level.next });
   };
 
   const back = () => {
@@ -198,6 +205,7 @@ function Popup(props: { ctx: Context; sessionID: string }) {
     commands: [
       { bind: "escape", title: "Back / close", group: "UniiChat", run: back },
       { bind: "return", title: "Zoom in", group: "UniiChat", run: zoomIn },
+      { bind: "n", title: "Next archive page", group: "UniiChat", run: nextPage },
       { bind: "up", title: "Previous line", group: "UniiChat", run: () => isList() ? select((current() as { selected: number }).selected - 1) : scroll?.scrollBy(-1) },
       { bind: "down", title: "Next line", group: "UniiChat", run: () => isList() ? select((current() as { selected: number }).selected + 1) : scroll?.scrollBy(1) },
       { bind: "pageup", title: "Previous page", group: "UniiChat", run: () => isList() ? pageSelect(-1) : scroll?.scrollBy(-page()) },
@@ -223,7 +231,7 @@ function Popup(props: { ctx: Context; sessionID: string }) {
     const level = current();
     const esc: [string, string] = ["esc", stack().length ? "back" : "close"];
     if (level.kind === "list") return [["↑↓", "select"], ["pgup/pgdn", "page"], ["enter", "zoom in"], esc];
-    return [["↑↓", "scroll"], ...(level.agent ? [["enter", `open agent ${level.agent}`] as [string, string]] : []), esc];
+    return [["↑↓", "scroll"], ...(level.next !== undefined ? [["n", "next archive page"] as [string, string]] : []), ...(level.agent ? [["enter", `open agent ${level.agent}`] as [string, string]] : []), esc];
   };
   const notice = () => busy() ? "Loading…"
     : zoomError() ? `Zoom error: ${zoomError()}`

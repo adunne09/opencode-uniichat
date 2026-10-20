@@ -56,8 +56,8 @@ var UniiChatRpc = Rpc.define({
     view: { input: session, output: z.array(z.string()) },
     archive: {
       input: z.union([
-        session.extend({ id: z.number().int().nonnegative(), n: z.number().int().positive() }),
-        session.extend({ name: z.string() })
+        session.extend({ id: z.number().int().nonnegative(), n: z.number().int().positive(), at: z.number().int().nonnegative().optional() }),
+        session.extend({ name: z.string(), at: z.number().int().nonnegative().optional() })
       ]),
       output: z.string()
     }
@@ -212,6 +212,7 @@ function Popup(props) {
       }, options);
       if (controller.signal.aborted)
         return;
+      const next = /\n\[characters \d+-\d+ of \d+; go on with at (\d+)\]$/.exec(text);
       const level = "n" in input && input.n > 1 ? {
         kind: "list",
         title,
@@ -222,7 +223,9 @@ function Popup(props) {
         kind: "text",
         title,
         text: text || "(empty)",
-        agent: "n" in input ? WORK.exec(text)?.[1] : undefined
+        target: input,
+        next: next ? Number(next[1]) : undefined,
+        agent: "n" in input ? WORK.exec(text.replace(LINE, ""))?.[1] : undefined
       };
       setStack((levels) => [...levels, level]);
       scroll?.scrollTo(0);
@@ -250,6 +253,14 @@ function Popup(props) {
         n: Number(match[2])
       });
   };
+  const nextPage = () => {
+    const level = current();
+    if (level.kind === "text" && level.next !== undefined)
+      open(`at ${level.next}`, {
+        ...level.target,
+        at: level.next
+      });
+  };
   const back = () => {
     setZoomError(undefined);
     if (stack().length === 0) {
@@ -272,6 +283,11 @@ function Popup(props) {
       title: "Zoom in",
       group: "UniiChat",
       run: zoomIn
+    }, {
+      bind: "n",
+      title: "Next archive page",
+      group: "UniiChat",
+      run: nextPage
     }, {
       bind: "up",
       title: "Previous line",
@@ -321,7 +337,7 @@ function Popup(props) {
     const esc = ["esc", stack().length ? "back" : "close"];
     if (level.kind === "list")
       return [["\u2191\u2193", "select"], ["pgup/pgdn", "page"], ["enter", "zoom in"], esc];
-    return [["\u2191\u2193", "scroll"], ...level.agent ? [["enter", `open agent ${level.agent}`]] : [], esc];
+    return [["\u2191\u2193", "scroll"], ...level.next !== undefined ? [["n", "next archive page"]] : [], ...level.agent ? [["enter", `open agent ${level.agent}`]] : [], esc];
   };
   const notice = () => busy() ? "Loading\u2026" : zoomError() ? `Zoom error: ${zoomError()}` : stack().length === 0 && viewError() ? `View error: ${viewError()}` : stack().length === 0 && loading() ? "Loading view\u2026" : stack().length === 0 && lines().length === 0 ? "The view is empty. It fills up as the chat goes on." : undefined;
   const Stat = (row) => (() => {

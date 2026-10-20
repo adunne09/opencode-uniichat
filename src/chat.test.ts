@@ -9,6 +9,9 @@ import type { Input, Output } from "./compactor.ts";
 import { Store, StoreError } from "./store.ts";
 import { clipEcho, formatDate, utf8Size } from "./record.ts";
 import { leafTask, mergeTask, tooLong } from "./prompts.ts";
+import { DEFAULT_ENGINE } from "./settings.ts";
+import { blocks } from "./view.ts";
+import { page } from "./record.ts";
 
 const run = Effect.runPromise;
 const temp = () => mkdtempSync(join(tmpdir(), "uniichat-chat-"));
@@ -66,7 +69,7 @@ test("files survive replay and reopen", async () => {
   await run(chat.log([attached]));
   const reopened = await run(Chat.open(dir, deps()));
   const result = await run(reopened.zoom(0, 1));
-  expect(result.text).toBe("user: message 0\n[file: picture.png image/png → files/0-0.png]\n[file: lost.pdf application/pdf, not available]");
+  expect(result.text).toBe("0+0|user: message 0\n[file: picture.png image/png → files/0-0.png]\n[file: lost.pdf application/pdf, not available]");
   expect(Array.from(result.files![0]!.data)).toEqual([1, 2, 255]);
   expect(result.files![0]!.mime).toBe("image/png");
 });
@@ -78,10 +81,11 @@ test("date gives a message's time and rejects ids outside the log", async () => 
   for (const id of [-1, 1]) expect((await run(Effect.result(chat.date(id))))._tag).toBe("Failure");
 });
 
-test("zoom rejects a missing n, ids past the log and lines that are not nodes", async () => {
+test("zoom defaults n to one and rejects ids past the log and invalid nodes", async () => {
   const chat = await run(Chat.open(temp(), deps()));
   await run(chat.log([item(0)]));
-  for (const [id, n] of [[0, undefined], [1, 1], [1, 2], [0, 3]]) expect((await run(Effect.result(chat.zoom(id!, n))))._tag).toBe("Failure");
+  expect(await run(chat.zoom(0))).toEqual(await run(chat.zoom("0", 1)));
+  for (const [id, n] of [[1, 1], [1, 2], [0, 3]]) expect((await run(Effect.result(chat.zoom(id!, n))))._tag).toBe("Failure");
 });
 
 test("instant leaves and merge cascades use no calls and each node is persisted once", async () => {
@@ -94,7 +98,7 @@ test("instant leaves and merge cascades use no calls and each node is persisted 
   const nodes = (await run(load(dir))).nodes;
   expect(calls).toBe(0);
   expect(nodes).toHaveLength(15);
-  expect(nodes.find((node) => node.l === 3)!.text).toBe(Array.from({ length: 8 }, (_, i) => `user: ${i}`).join("\n"));
+  expect(nodes.find((node) => node.l === 3)!.text).toBe("user: 0 user: 1 user: 2 user: 3\nuser: 4 user: 5 user: 6 user: 7");
   expect(nodes.filter((node) => node.l === 0).map((node) => node.i)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
   await run(chat.log([item(0, "0")]));
   expect((await run(load(dir))).nodes).toHaveLength(15);
@@ -104,7 +108,7 @@ test("instant leaves and merge cascades use no calls and each node is persisted 
   expect(wrong.message).toContain("The tree's roots: 0+8, 8+2, 10+1.");
 });
 
-test("requires both system and tools, then sends exact context blocks and merge tasks", async () => {
+test("requires a system but no tool snapshot, then sends source-aligned blocks and unheaded merge bodies", async () => {
   await run(Effect.gen(function* () {
     const fake = yield* controlled();
     const chat = yield* Chat.open(temp(), fake.deps);
@@ -112,22 +116,23 @@ test("requires both system and tools, then sends exact context blocks and merge 
     yield* chat.log([item(7, "long".repeat(200))]);
     yield* chat.setSystem("system");
     yield* flush;
-    expect(fake.seen).toHaveLength(0);
+    expect(fake.seen).toHaveLength(1);
     const tools = [{ name: "zoom", description: "zoom tool", input: { type: "object" } }];
     yield* chat.setTools(tools);
     tools[0]!.description = "changed externally";
     const call = yield* Queue.take(fake.calls);
     expect(call.input.system).toBe("system");
-    expect(call.input.tools[0]!.description).toBe("zoom tool");
+    expect(call.input.tools).toEqual([]);
     expect(call.input.turns).toEqual([{ role: "user", parts: [
-      { text: "<chat>\n0+1|user: 0\n1+1|user: 1\n2+1|user: 2\n3+1|user: 3\n", cache: true },
-      { text: "4+1|user: 4\n5+1|user: 5\n6+1|user: 6\n</chat>" },
-      { text: leafTask(7, "user", "long".repeat(200)), cache: true },
+      { text: "<chat>\n" },
+      { text: "0+1|user: 0\n1+1|user: 1\n2+1|user: 2\n3+1|user: 3\n", cache: true },
+      { text: "4+1|user: 4\n5+1|user: 5\n6+1|user: 6\n</chat>\n" },
+      { text: leafTask(7, "user", "long".repeat(200)) },
     ] }]);
     yield* Deferred.succeed(call.reply, output("x".repeat(510)));
     yield* chat.awaitSummarized();
     const merge = yield* Queue.take(fake.calls);
-    expect(merge.input.turns[0]!.parts.at(-1)!.text).toBe(mergeTask("6+1", "7+1", 6, 7, "6+1|user: 6", `7+1|${"x".repeat(510)}`));
+    expect(merge.input.turns[0]!.parts.at(-1)!.text).toBe(mergeTask("6+1", "7+1", 6, 7, "user: 6", "x".repeat(510)));
     yield* Deferred.succeed(merge.reply, output("short"));
     yield* flush;
     expect(chat.status().inFlight).toBe(0);
@@ -138,7 +143,7 @@ test("eight-call cap and strict earlier-leaf rule include fitting leaves", async
   await run(Effect.gen(function* () {
     const fake = yield* controlled();
     const dir = temp();
-    const chat = yield* Chat.open(dir, fake.deps);
+    const chat = yield* Chat.open(dir, { ...fake.deps, settings: { ...DEFAULT_ENGINE, concurrency: 8 } });
     yield* ready(chat);
     yield* chat.log([...Array.from({ length: 8 }, (_, i) => item(i, "L".repeat(600))), item(8, "fits")]);
     const calls: Call[] = [];
@@ -158,23 +163,19 @@ test("eight-call cap and strict earlier-leaf rule include fitting leaves", async
   }));
 });
 
-test("same-prefix calls wait for response start, not response completion", async () => {
+test("the engine can dispatch 64 leaves; cache coordination belongs to the transport", async () => {
   await run(Effect.gen(function* () {
     const fake = yield* controlled(false);
     const chat = yield* Chat.open(temp(), fake.deps);
     yield* ready(chat);
-    yield* chat.log([item(0, "L".repeat(600)), item(1, "M".repeat(600)), item(2, "N".repeat(600))]);
-    const a = yield* Queue.take(fake.calls);
-    yield* flush;
-    expect(fake.seen).toHaveLength(1);
-    yield* Deferred.succeed(a.input.started!, undefined);
-    const b = yield* Queue.take(fake.calls);
-    yield* flush;
-    expect(fake.seen).toHaveLength(2);
-    yield* Deferred.succeed(b.input.started!, undefined);
-    const c = yield* Queue.take(fake.calls);
-    expect(chat.status().pending).toBe(3);
-    for (const call of [c, b, a]) yield* Deferred.succeed(call.reply, output("short"));
+    yield* chat.log(Array.from({ length: 65 }, (_, i) => item(i, "L".repeat(600))));
+    const calls: Call[] = [];
+    for (let i = 0; i < 64; i++) calls.push(yield* Queue.take(fake.calls));
+    expect(fake.seen).toHaveLength(64);
+    expect(chat.status().inFlight).toBe(64);
+    for (const call of calls) yield* Deferred.succeed(call.reply, output("s"));
+    const last = yield* Queue.take(fake.calls);
+    yield* Deferred.succeed(last.reply, output("s"));
     yield* chat.awaitSummarized();
     yield* flush;
     expect(chat.status().inFlight).toBe(0);
@@ -193,10 +194,11 @@ test("only the last whole block is marked, and an empty tail closes chat", async
   expect(seen).toHaveLength(1);
   const parts = seen[0]!.turns[0]!.parts;
   expect(parts).toEqual([
-    { text: "<chat>\n0+1|user: 0\n1+1|user: 1\n2+1|user: 2\n3+1|user: 3\n" },
+    { text: "<chat>\n" },
+    { text: "0+1|user: 0\n1+1|user: 1\n2+1|user: 2\n3+1|user: 3\n" },
     { text: "4+1|user: 4\n5+1|user: 5\n6+1|user: 6\n7+1|user: 7\n", cache: true },
-    { text: "</chat>" },
-    { text: leafTask(8, "user", "L".repeat(600)), cache: true },
+    { text: "</chat>\n" },
+    { text: leafTask(8, "user", "L".repeat(600)) },
   ]);
 });
 
@@ -388,7 +390,7 @@ test("restart loads byte-identical rendered views", async () => {
   const before = chat.renderView();
   const reopen = await run(Chat.open(dir, deps()));
   expect(reopen.renderView()).toEqual(before);
-  expect(reopen.status().viewBytes).toBe(utf8Size("0+1|user: message 0\n1+1|user: message 1\n2+1|summary\n"));
+  expect(reopen.status().viewBytes).toBe(utf8Size("user: message 0user: message 1summary"));
   expect(reopen.hasTools()).toBe(false);
 });
 
@@ -417,7 +419,7 @@ test("missing views replay durable leaves on restart and pending batch flags are
   const store = await run(Store.open(dir));
   await run(store.appendRecord({ i: 0, kind: "user", text: "x", size: 1, date: new Date(item(0).date).toISOString(), src: "x:0" }));
   const chat = await run(Chat.open(dir, deps()));
-  expect(chat.renderView()).toEqual({ blocks: [], tail: "<chat>\n0+1|(not summarized yet: zoom it)\n</chat>" });
+  expect(chat.renderView()).toEqual(blocks(["0+1|(not summarized yet: zoom it)"]));
   await run(store.saveViews([[0, 0]], [[0, 0]], { chat: true, compaction: true }));
   const restored = await run(Chat.open(dir, deps()));
   await run(restored.log([item(1)]));
@@ -440,7 +442,7 @@ test("a crash after record append replays only the missing saved-view suffix", a
   const saved = await run(load(dir));
   expect(saved.records.map((rec) => rec.i)).toEqual([0, 1, 2, 3]);
   expect(saved.view).toEqual([[0, 0], [0, 1], [0, 2], [0, 3]]);
-  expect(saved.compView).toEqual(saved.view);
+  expect(saved.compView).toEqual([]); // no built leaf prefix yet
 });
 
 for (const behind of ["chat", "compaction"] as const) {
@@ -457,8 +459,8 @@ for (const behind of ["chat", "compaction"] as const) {
     const chat = await run(Chat.open(dir, deps()));
     const recovered = await run(store.load());
     expect(recovered.view).toEqual(full);
-    expect(recovered.compView).toEqual(full);
-    expect(chat.renderView().tail.startsWith("<chat>\n0+2|saved pair\n")).toBe(true);
+    expect(recovered.compView).toEqual([]); // saved parents do not imply built leaves
+    expect(chat.renderView().tail.startsWith("0+2|saved pair\n")).toBe(true);
     expect((await run(Chat.open(dir, deps()))).renderView()).toEqual(chat.renderView());
   });
 }
@@ -558,7 +560,7 @@ test("an ambiguous instant write is not built until the retained text is flushed
   } finally { fault.mockRestore(); }
 });
 
-test("a pre-header failure releases later same-prefix compactions", async () => {
+test("a transport failure does not stall other nodes, and retries on the next append", async () => {
   await run(Effect.gen(function* () {
     const fake = yield* controlled(false);
     const chat = yield* Chat.open(temp(), fake.deps);
@@ -566,10 +568,9 @@ test("a pre-header failure releases later same-prefix compactions", async () => 
     yield* chat.log([item(0, "L".repeat(600)), item(1, "M".repeat(600))]);
     const first = yield* Queue.take(fake.calls);
     yield* flush;
-    expect(fake.seen).toHaveLength(1);
+    expect(fake.seen).toHaveLength(2);
     yield* Deferred.fail(first.reply, "before headers");
     const second = yield* Queue.take(fake.calls);
-    expect(Deferred.isDoneUnsafe(first.input.started!)).toBe(true);
     yield* Deferred.succeed(second.reply, output("second"));
     yield* flush;
     expect(chat.status().failed).toBe(1);
@@ -602,7 +603,7 @@ test("out-of-order completions keep a gap-free view and merges wait for both hal
     yield* chat.awaitSummarized();
     yield* flush;
     const rendered = chat.renderView().blocks.join("") + chat.renderView().tail;
-    expect(rendered).toBe("<chat>\n0+1|short\n1+1|short\n2+1|" + "t".repeat(300) + "\n3+1|" + "s".repeat(300) + "\n</chat>");
+    expect(rendered).toBe("<chat>\n0+1|short\n1+1|short\n2+1|" + "t".repeat(300) + "\n3+1|" + "s".repeat(300) + "\n</chat>\n");
     const refs = (yield* load(dir)).view!;
     let next = 0;
     for (const [l, i] of refs) { expect(i * 2 ** l).toBe(next); next += 2 ** l; }
@@ -635,7 +636,9 @@ test("agent logs split long text, clip echoes, dedupe replays and stay out of th
   await run(chat.logAgent("explore-1", items));
   await run(chat.logAgent("explore-1", items));
   const reopened = await run(Chat.open(dir, deps()));
-  expect((await run(reopened.zoom("explore-1"))).text).toBe(`0|user: ${"L".repeat(30000)}\n1|user: L\n2|echo: ${clipEcho("E".repeat(31000))}`);
+  const whole = `0|user: ${"L".repeat(30000)}\n\n1|user: L\n\n2|echo: ${clipEcho("E".repeat(31000))}`;
+  expect((await run(reopened.zoom("explore-1"))).text).toBe(page(whole));
+  expect((await run(reopened.zoom("explore-1", 1, 30000))).text).toBe(page(whole, 30000));
   expect(reopened.status().T).toBe(0);
 });
 
@@ -682,7 +685,7 @@ test("rewind drops undone records and their nodes, and the slot is rebuilt from 
   expect(loaded.nodes.find((node) => node.l === 0 && node.i === 3)!.text).toBe("user: redo");
   const reopened = await run(Chat.open(dir, deps()));
   expect(reopened.renderView()).toEqual(chat.renderView());
-  expect((await run(reopened.zoom(3, 1))).text).toBe("user: redo");
+  expect((await run(reopened.zoom(3, 1))).text).toBe("3+0|user: redo");
   expect(reopened.status().T).toBe(4);
 });
 
@@ -703,4 +706,42 @@ test("a compaction started before a rewind is dropped, and its slot is rebuilt f
     expect(chat.renderView().tail).toContain("1+1|fresh summary");
     expect(chat.renderView().tail).not.toContain("stale");
   }));
+});
+
+test("background completions shrink both views without another append", async () => {
+  await run(Effect.gen(function* () {
+    const gate = Deferred.makeUnsafe<void>();
+    const chat = yield* Chat.open(temp(), {
+      settings: { ...DEFAULT_ENGINE, chat: { high: 2000, low: 1000 }, compaction: { high: 1000, low: 500 } },
+      compact: (input) => Deferred.await(gate).pipe(Effect.as(output(input.turns[0]!.parts.at(-1)!.text.includes("merge lines") ? "m".repeat(100) : "s".repeat(400)))),
+    });
+    yield* ready(chat);
+    yield* chat.log(Array.from({ length: 16 }, (_, i) => item(i, "L".repeat(600))));
+    expect(chat.status().compViewBytes).toBe(0);
+    yield* Deferred.succeed(gate, undefined);
+    yield* chat.awaitSummarized();
+    yield* flush;
+    expect(chat.status().T).toBe(16);
+    expect(chat.status().lines).toBeLessThan(16);
+    expect(chat.status().viewBytes).toBeLessThanOrEqual(2000);
+    expect(chat.status().compViewBytes).toBeLessThanOrEqual(1000);
+    yield* chat.close();
+  }));
+});
+
+test("closing a chat interrupts model calls and releases summary waiters", async () => {
+  await run(Effect.scoped(Effect.gen(function* () {
+    const started = Deferred.makeUnsafe<void>(), stopped = Deferred.makeUnsafe<void>();
+    const chat = yield* Chat.open(temp(), deps(() => Deferred.succeed(started, undefined).pipe(
+      Effect.andThen(Effect.never), Effect.ensuring(Deferred.succeed(stopped, undefined)),
+    )));
+    yield* ready(chat);
+    yield* chat.log([item(0, "L".repeat(600))]);
+    yield* Deferred.await(started);
+    const waiting = yield* chat.awaitSummarized().pipe(Effect.result, Effect.forkScoped);
+    yield* chat.close();
+    expect(Deferred.isDoneUnsafe(stopped)).toBe(true);
+    expect((yield* Fiber.join(waiting))._tag).toBe("Failure");
+    expect((yield* Effect.result(chat.log([item(1)])))._tag).toBe("Failure");
+  })));
 });

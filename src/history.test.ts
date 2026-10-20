@@ -103,7 +103,7 @@ describe("history log items", () => {
     expect(items([error], { name }).at(-1)?.text).toBe("error: detail");
   });
 
-  test("subagent reports are work; user-invoked skills are user; shell and other control rows are omitted", () => {
+  test("subagent reports are work, skills are user, completed shell commands are echoes", () => {
     const rows: Row[] = [
       { type: "synthetic", id: "msg_report", text: wrapper("line one\n\nline two"), metadata: { source: "subagent", childID: "ses_child" }, time },
       { type: "synthetic", id: "msg_other", text: "ignore", time },
@@ -118,6 +118,7 @@ describe("history log items", () => {
     expect(items(rows, { name })).toEqual([
       { kind: "work", text: "[explore-1] line one\n\nline two", date: time.created, src: "msg_report" },
       { kind: "user", text: "instructions", date: time.created, src: "msg_skill" },
+      { kind: "echo", text: "$ pwd\n[exited]\n", date: time.created, src: "msg_shell" },
     ]);
     for (const report of ["Subagent cancelled", "failed", "\n spaced \n", ""]) expect(subagentReport(wrapper(report))).toBe(report);
     for (const text of ["not wrapped", "<subagent broken>", "<subagent broken>\npartial"]) {
@@ -127,15 +128,23 @@ describe("history log items", () => {
 });
 
 describe("context request", () => {
-  test("earlier turns and system updates are dropped; call-result pairs survive", () => {
+  test("pre-turn instruction sources retain only their latest notice", () => {
+    const old = { ...msg("system", "catalog-old", "old catalog"), metadata: { instructionSources: ["catalog"] } };
+    const latest = { ...msg("system", "catalog-new", "new catalog"), metadata: { instructionSources: ["catalog"] } };
+    const out = request([old, msg("user", "msg_old"), latest, msg("user", "msg_new")]);
+    expect(out.map((message) => message.id)).toEqual(["catalog-new", "msg_new"]);
+    expect(texts(out[0]!)).toEqual(["new catalog"]);
+  });
+  test("earlier turns are dropped; dynamic system updates and call-result pairs survive", () => {
     const call = { type: "tool-call" as const, id: "call_1", name: "read", input: { path: "a" } };
     const result = { type: "tool-result" as const, id: "call_1", name: "read", result: { type: "text" as const, value: "output" } };
     const source: RequestMessage[] = [msg("user", "msg_old"), msg("assistant", "msg_old_a"), msg("user", "msg_new"), msg("system", undefined, "new instructions"), { role: "assistant", id: "msg_a", content: [call] }, { role: "tool", content: [result] }];
     const before = JSON.stringify(source);
     const output = request(source);
-    expect(output.map((message) => [message.role, message.id])).toEqual([["user", "msg_new"], ["assistant", "msg_a"], ["tool", undefined]]);
-    expect(output[1]!.content).toEqual([call]);
-    expect(output[2]!.content).toEqual([{ ...result, cache: { type: "ephemeral" } }]);
+    expect(output.map((message) => [message.role, message.id])).toEqual([["user", "msg_new"], ["system", undefined], ["assistant", "msg_a"], ["tool", undefined]]);
+    expect(output[1]!.content).toEqual([{ type: "text", text: "new instructions" }]);
+    expect(output[2]!.content).toEqual([call]);
+    expect(output[3]!.content).toEqual([{ ...result, cache: { type: "ephemeral" } }]);
     expect(marked(output)).toHaveLength(2);
     expect(JSON.stringify(source)).toBe(before);
     expect(() => request([msg("user", "msg_old")])).toThrow("turn cut");
@@ -144,7 +153,7 @@ describe("context request", () => {
   test("user-first content gets view then state then original parts", () => {
     const original = Message.make({ id: "msg_new", role: "user", content: [{ type: "text", text: "task", cache: { type: "ephemeral" } }] });
     const output = request([original]);
-    expect(texts(output[0]!)).toEqual(["<chat>\n0+1|old\n1+1|old\n2+1|old\n3+1|old\n", "</chat>", "state", "task"]);
+    expect(texts(output[0]!)).toEqual(["<chat>\n", "0+1|old\n1+1|old\n2+1|old\n3+1|old\n", "</chat>\n", "state", "Turn: the user's new message:\n\n", "task"]);
     expect(marked(output)).toHaveLength(2);
     const normalized = Message.make(output[0]!);
     expect(normalized.id).toBe("msg_new");
@@ -167,20 +176,20 @@ describe("context request", () => {
   for (const tail of [0, 1, 2, 3]) test(`view with ${tail} tail lines marks only last whole block and request end`, () => {
     const view = blocks(Array.from({ length: 8 + tail }, (_, i) => `${i}+1|line`));
     const output = request([msg("user", "msg_new")], { view });
-    expect(output[0]!.content.slice(0, 3)).toEqual([{ type: "text", text: view.blocks[0] }, { type: "text", text: view.blocks[1], cache: { type: "ephemeral" } }, { type: "text", text: view.tail }]);
+    expect(output[0]!.content.slice(0, 4)).toEqual([{ type: "text", text: view.blocks[0] }, { type: "text", text: view.blocks[1] }, { type: "text", text: view.blocks[2], cache: { type: "ephemeral" } }, { type: "text", text: view.tail }]);
     expect(marked(output)).toHaveLength(2);
   });
 
-  test("a view with no whole block has only the end mark", () => {
+  test("a view with no whole block marks its opening and the request end", () => {
     const output = request([msg("user", "msg_new")], { view: blocks(["0+1|old"]) });
-    expect(marked(output)).toHaveLength(1);
-    expect(texts(output[0]!)[0]).toBe("<chat>\n0+1|old\n</chat>");
+    expect(marked(output)).toHaveLength(2);
+    expect(texts(output[0]!).slice(0, 2)).toEqual(["<chat>\n", "0+1|old\n</chat>\n"]);
   });
 
-  test("children keep all checkpoint-selected history and omit state and system rows", () => {
+  test("children keep checkpoint-selected history and system rows but omit state and turn heading", () => {
     const output = request([msg("system"), msg("user", "msg_checkpoint"), msg("assistant", "msg_old_a"), msg("user", "msg_new")], { child: true, turnIds: new Set() });
-    expect(output.map((message) => message.id)).toEqual(["msg_checkpoint", "msg_old_a", "msg_new"]);
-    expect(texts(output[0]!)).toEqual(["<chat>\n0+1|old\n1+1|old\n2+1|old\n3+1|old\n", "</chat>", "task"]);
+    expect(output.map((message) => message.id)).toEqual([undefined, "msg_checkpoint", "msg_old_a", "msg_new"]);
+    expect(texts(output[1]!)).toEqual(["<chat>\n", "0+1|old\n1+1|old\n2+1|old\n3+1|old\n", "</chat>\n", "task"]);
     expect(request([msg("assistant", "msg_old_a")], { child: true })[0]!.role).toBe("user");
   });
 });
@@ -230,14 +239,14 @@ describe("btw request", () => {
   test("mid-turn: view, raw turn, question; earlier history dropped", () => {
     const out = btwRequest({ messages: [msg("user", "msg_old", "old"), msg("user", "msg_new"), msg("assistant", "msg_a", "working"), msg("user", undefined, "side?")], turnIds: new Set(["msg_new", "msg_a"]), view, reports: new Map() });
     expect(out.map((message) => message.id)).toEqual(["msg_new", "msg_a", undefined]);
-    expect(texts(out[0]!)[0]).toContain("0+1|old");
+    expect(texts(out[0]!).join("")).toContain("0+1|old");
     expect(texts(out[0]!).at(-1)).toBe("task");
     expect(texts(out[2]!)).toEqual(["side?"]);
   });
   test("between turns: only the view and the question, with extra text appended", () => {
     const out = btwRequest({ messages: [msg("user", "msg_old", "old"), msg("assistant", "msg_r", "reply"), msg("user", undefined, "side?")], turnIds: new Set(), view, reports: new Map(), extra: "note" });
     expect(out).toHaveLength(1);
-    expect(texts(out[0]!)[0]).toContain("0+1|old");
+    expect(texts(out[0]!).join("")).toContain("0+1|old");
     expect(texts(out[0]!).slice(-2)).toEqual(["side?", "note"]);
     expect(texts(out[0]!).join("")).not.toContain("reply");
   });

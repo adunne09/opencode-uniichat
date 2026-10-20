@@ -42,6 +42,18 @@ export function splitText(text: string, limit = 30000): string[] {
   return result;
 }
 
+export const PAGE = 30000;
+export function pageEnd(text: string, at: number): number {
+  if (text.length - at <= PAGE) return text.length;
+  const nl = text.lastIndexOf("\n", at + PAGE - 1);
+  return nl >= at ? nl + 1 : at + PAGE - (text.charCodeAt(at + PAGE) >> 10 === 0x37 ? 1 : 0);
+}
+export function page(text: string, at = 0): string {
+  if (!Number.isSafeInteger(at) || at < 0) throw new RangeError("at must be a non-negative safe integer");
+  const from = Math.min(at, text.length), end = pageEnd(text, from);
+  return text.slice(from, end) + (end < text.length ? `\n[characters ${from + 1}-${end} of ${text.length}; go on with at ${end}]` : "");
+}
+
 function safeSlice(s: string, start: number, end: number) {
   if (start > 0 && /[\uD800-\uDBFF]/.test(s[start - 1]) && /[\uDC00-\uDFFF]/.test(s[start])) start++;
   if (end < s.length && /[\uD800-\uDBFF]/.test(s[end - 1]) && /[\uDC00-\uDFFF]/.test(s[end])) end--;

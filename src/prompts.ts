@@ -150,13 +150,14 @@ your final reply.`;
 
 export const BTW_LOOKUP_NOTE = `[Before this side question is answered: if your memory above lacks a detail
 you need, open it now by replying only with calls, one per line, written as
-zoom(id, n), zoom("Name") or date(id); no other tool is available. Their results
+zoom(id, n, at), zoom("Name", 1, at) or date(id); n defaults to 1 and at to 0.
+Use the next at offset shown by a truncated page. No other tool is available. Their results
 come back in the next message. When you have what you need, or need nothing,
 reply only READY. The answer comes in a later request.]`;
 
-export interface LookupCall { name: "zoom" | "date"; id: number | string; n?: number; text: string }
+export interface LookupCall { name: "zoom" | "date"; id: number | string; n?: number; at?: number; text: string }
 
-const CALL = /^\s*`?(zoom|date)\(\s*(?:"([^"]*)"|(\d+))\s*(?:,\s*(\d+)\s*)?\)`?\s*$/;
+const CALL = /^\s*`?(zoom|date)\(\s*(?:"([^"]*)"|(\d+))\s*(?:,\s*(\d+)\s*)?(?:,\s*(\d+)\s*)?\)`?\s*$/;
 
 /** The zoom/date calls a /btw lookup reply asks for, one per line; none if it says READY or anything else. */
 export function lookupCalls(reply: string): LookupCall[] {
@@ -164,12 +165,13 @@ export function lookupCalls(reply: string): LookupCall[] {
   for (const line of reply.split("\n")) {
     const match = CALL.exec(line);
     if (!match) continue;
-    const [, name, agent, id, n] = match;
+    const [, name, agent, id, n, at] = match;
     if (name === "date" && (agent !== undefined || n !== undefined)) continue;
     calls.push({
       name: name as LookupCall["name"],
       id: agent ?? Number(id),
       ...(n === undefined ? {} : { n: Number(n) }),
+      ...(at === undefined ? {} : { at: Number(at) }),
       text: line.trim().replace(/^`|`$/g, ""),
     });
   }
@@ -187,7 +189,8 @@ export function btwMemory(opened: readonly { call: string; text: string }[]) {
   return `Memory opened for this question:\n\n${opened.map((item) => `> ${item.call}\n${item.text}`).join("\n\n")}`;
 }
 
-export const ZOOM_DESCRIPTION = "Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole.";
+export const TURN_HEAD = "Turn: the user's new message:\n\n";
+export const ZOOM_DESCRIPTION = "Open id+n into its two children; n defaults to 1 for the original message with attachments. A subagent name as id opens its chat. Long text is paginated: pass the character offset at shown by the previous page.";
 export const DATE_DESCRIPTION = "The date and time of message id.";
 
 export interface StateInput {

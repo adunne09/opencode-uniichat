@@ -4,12 +4,12 @@ import type { Plugin } from "@opencode/plugin/effect";
 import type { SessionContext, SessionCompaction } from "@opencode/plugin/effect/session";
 import { SessionMessage } from "@opencode/schema/session-message";
 import { Session } from "@opencode/schema/session";
-import { DateTime, Deferred, Effect, Queue, Schema, Stream } from "effect";
+import { DateTime, Deferred, Effect, Fiber, Queue, Schema, Stream } from "effect";
 import { integrate, toWire, type IntegrationOptions } from "./index.ts";
 import type { Row, Item } from "./history.ts";
 import { blocks } from "./view.ts";
 import { SUBAGENT_NOTE, SYSTEM_PROMPT } from "./prompts.ts";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Chat } from "./chat.ts";
@@ -85,7 +85,7 @@ function fixture(initial: Row[], on = true) {
   });
   return { sessionID, childID, hooks, toolHooks, tools, ctx, options, event, logged, agentLogged, storage,
     rows: (next: Row[]) => { rows = next; }, lines: (next: string[]) => { lines = next; }, system: () => system,
-    reads: () => contextReads, rpc: () => handlers!, events, finalLogged,
+    reads: () => contextReads, rpc: () => handlers!, events, finalLogged, chat,
   };
 }
 
@@ -100,8 +100,9 @@ test("first request drops old turns; continuation keeps the frozen view and step
     expect(first.system[0]!.text).not.toContain("Today's date:");
     expect(first.messages.map((message) => message.id)).toEqual(["msg_new"]);
     const firstTexts = first.messages[0]!.content.filter((part) => part.type === "text").map((part) => part.text);
-    expect(firstTexts[0]).toContain("0+1|old");
-    expect(firstTexts[2]).toStartWith("Today's date:");
+    expect(firstTexts.join("")).toContain("0+1|old");
+    expect(firstTexts[3]).toStartWith("Today's date:");
+    expect(firstTexts[4]).toBe("Turn: the user's new message:\n\n");
     expect(firstTexts.at(-1)).toBe("task");
     expect(Object.keys(first.tools)).toContain("zoom");
     // The raw request drops the old turn; first switch-on imports it into memory instead.
@@ -155,8 +156,8 @@ test("children keep their own prompt, get the view, omit state, and retain nativ
     yield* f.hooks.get("context")!(child);
     expect(child.system.map((part) => part.text)).toEqual(["vanilla", "# Code Mode\n\ncatalog\n\nToday's date: ignore", SUBAGENT_NOTE]);
     expect(child.system.some((part) => part.text.includes(SYSTEM_PROMPT))).toBe(false);
-    expect(child.messages).toHaveLength(1);
-    const text = child.messages[0]!.content.flatMap((part) => part.type === "text" ? [part.text] : []);
+    expect(child.messages).toHaveLength(2);
+    const text = child.messages[1]!.content.flatMap((part) => part.type === "text" ? [part.text] : []);
     expect(text.at(-1)).toBe("child task");
     expect(text.some((text) => text.startsWith("Today's date:"))).toBe(false);
     expect(f.agentLogged[0]!.src).toBe(`${f.childID}:msg_child`);
@@ -187,6 +188,48 @@ test("a child of a disabled parent stays vanilla", async () => {
   })));
 });
 
+test("a child waits for parent summaries before freezing its view", async () => {
+  const f = fixture([user("msg_new")]);
+  await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+    yield* integrate(f.ctx, f.options);
+    yield* f.hooks.get("context")!(f.event());
+    const ready = Deferred.makeUnsafe<void>(), entered = Deferred.makeUnsafe<void>();
+    f.chat.awaitSummarized = () => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(ready)));
+    f.rows([user("msg_child")]);
+    const event = f.event([msg("user", "task", "msg_child")], f.childID);
+    const waiting = yield* f.hooks.get("context")!(event).pipe(Effect.forkScoped);
+    yield* Deferred.await(entered);
+    expect(f.agentLogged).toHaveLength(0);
+    f.lines(["0+1|finished summary"]);
+    yield* Deferred.succeed(ready, undefined);
+    yield* Fiber.join(waiting);
+    expect(event.messages[0]!.content.flatMap((part) => part.type === "text" ? part.text : []).join("")).toContain("finished summary");
+  })));
+});
+
+test("new turns refresh loaded instruction files and catalog without toggling UniiChat", async () => {
+  const f = fixture([user("msg_new")]);
+  const dir = mkdtempSync(join(tmpdir(), "uniichat-rules-"));
+  const path = join(dir, "AGENTS.md");
+  writeFileSync(path, "first rule");
+  await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+    yield* integrate(f.ctx, f.options);
+    const first = f.event();
+    first.system.push({ type: "text", text: `Instructions from: ${path}\nfirst rule` });
+    yield* f.hooks.get("context")!(first);
+    expect(first.system[0]!.text).toContain("first rule");
+    writeFileSync(path, "updated rule");
+    f.rows([user("msg_new"), idle("msg_idle"), user("msg_next")]);
+    const next = f.event([msg("user", "next", "msg_next")]);
+    next.system = [{ type: "text", text: `# Code Mode\n\nupdated catalog\n\nInstructions from: ${path}\nstale rendered rule` }];
+    yield* f.hooks.get("context")!(next);
+    expect(next.system[0]!.text).toContain("updated rule");
+    expect(next.system[0]!.text).toContain("updated catalog");
+    expect(next.system[0]!.text).not.toContain("first rule");
+    expect(next.system[0]!.text).not.toContain("stale rendered rule");
+  })));
+});
+
 test("restart recovery logs only anchored segments, before freezing the new input", async () => {
   const checkpoint: Row = { type: "compaction", id: "msg_cp", status: "completed", reason: "auto", summary: "summary", time: { created: 1000 } };
   const f = fixture([checkpoint, idle("msg_after_cp"), user("msg_new", "new input")]);
@@ -205,9 +248,9 @@ test("restart recovery logs only anchored segments, before freezing the new inpu
     const event = f.event();
     yield* f.hooks.get("context")!(event);
     expect(f.logged.map((item) => item.src)).toEqual(["msg_recorded", "msg_missed", "msg_new"]);
-    const text = event.messages[0]!.content[0];
-    expect(text.type === "text" && text.text).toContain("missed steering");
-    expect(text.type === "text" && text.text).not.toContain("new input");
+    const text = event.messages[0]!.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
+    expect(text).toContain("missed steering");
+    expect(text.split("</chat>")[0]).not.toContain("new input");
   })));
 });
 
@@ -229,10 +272,10 @@ test("first switch-on imports earlier vanilla turns, even before a checkpoint, i
     const event = f.event();
     yield* f.hooks.get("context")!(event);
     expect(f.logged.map((item) => item.src)).toEqual(["msg_v1", "msg_v2", "msg_new"]);
-    const text = event.messages[0]!.content[0];
-    expect(text.type === "text" && text.text).toContain("first vanilla");
-    expect(text.type === "text" && text.text).toContain("second vanilla");
-    expect(text.type === "text" && text.text).not.toContain("new input");
+    const text = event.messages[0]!.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
+    expect(text).toContain("first vanilla");
+    expect(text).toContain("second vanilla");
+    expect(text.split("</chat>")[0]).not.toContain("new input");
     yield* f.hooks.get("context")!(f.event());
     expect(asked).toBe(1);
   })));
@@ -431,7 +474,7 @@ test("a UniiChat compaction stub mid-turn: the turn is rebuilt from the full mes
     expect(next.messages.map((message) => message.id)).toEqual(["msg_new", "msg_r1", "msg_r2"]);
     const texts = next.messages.map((message) => message.content.flatMap((part) => part.type === "text" ? [part.text] : []));
     expect(texts[0]!.at(-1)).toBe("task");
-    expect(texts[0]![0]).toContain("0+1|old");
+    expect(texts[0]!.join("")).toContain("0+1|old");
     expect(texts.flat().some((text) => text.includes("conversation-checkpoint"))).toBe(false);
     // Unreachable full list: no throw, the request starts at the stub's checkpoint.
     f.options.older = () => Effect.succeed(undefined);
@@ -452,7 +495,7 @@ test("/btw gets Unii's prompt and memory instead of the whole session; off or ch
     expect(btw.system).toEqual([{ type: "text", text: f.system()! }]);
     expect(btw.messages).toHaveLength(1);
     const parts = btw.messages[0]!.content.flatMap((part) => part.type === "text" ? [part.text] : []);
-    expect(parts[0]).toContain("0+1|old");
+    expect(parts.join("")).toContain("0+1|old");
     expect(parts.at(-1)).toBe("side question?");
     expect(parts.join("")).not.toContain("reply");
     yield* f.rpc().set({ sessionID: f.sessionID, on: false });

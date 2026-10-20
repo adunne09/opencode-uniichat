@@ -1,6 +1,6 @@
 # Architecture decision records
 
-One short record per decision made while building UniiChat. Records marked as deviations depart from the recipe.
+One short record per decision made while building UniiChat. Records marked as deviations depart from the recipe. ADR-0063 makes the released source authoritative and amends earlier recipe-era behavior where listed there.
 
 A new decision gets the next number; a changed decision gets a new record, and the old record's status points to it.
 
@@ -16,7 +16,7 @@ A new decision gets the next number; a changed decision gets a new record, and t
 | [0006](0006-switch.md) | On/off switch per session **(deviation)** | Accepted |
 | [0007](0007-native-compaction.md) | Native compaction | Accepted, refined by ADR-0051 |
 | [0008](0008-raw-turn-overflow.md) | Raw-turn overflow | Accepted |
-| [0009](0009-storage.md) | Storage | Amended by ADR-0041 |
+| [0009](0009-storage.md) | Storage | Amended by ADR-0041 and ADR-0063 |
 | [0010](0010-tools.md) | zoom and date are global tools, hidden from vanilla sessions | Accepted |
 | [0011](0011-no-capture-exclusions.md) | No capture exclusions | Accepted |
 | [0012](0012-ui.md) | Popup | Accepted, extended by ADR-0044, ADR-0047 and ADR-0049 |
@@ -28,15 +28,15 @@ A new decision gets the next number; a changed decision gets a new record, and t
 | [0018](0018-turn-boundary.md) | Turn boundary | Accepted |
 | [0019](0019-per-turn-state-format.md) | Per-turn state format | Accepted |
 | [0020](0020-subagent-reports-in-the-request.md) | Subagent reports in the request | Accepted |
-| [0021](0021-view-size.md) | View size | Accepted |
-| [0022](0022-compaction-view-on-a-chat-view-merge.md) | Compaction view after a chat-view merge | Accepted |
+| [0021](0021-view-size.md) | View size | Superseded by ADR-0063 |
+| [0022](0022-compaction-view-on-a-chat-view-merge.md) | Compaction view after a chat-view merge | Superseded by ADR-0063 |
 | [0023](0023-formats.md) | Record formats | Accepted |
-| [0024](0024-queue-priority.md) | Queue priority | Accepted |
-| [0025](0025-shell-messages.md) | Shell messages are not logged **(deviation)** | Accepted |
+| [0024](0024-queue-priority.md) | Queue priority | Superseded by ADR-0063 |
+| [0025](0025-shell-messages.md) | Shell messages are not logged **(deviation)** | Superseded by ADR-0063 |
 | [0026](0026-frozen-render-in-memory-only.md) | Frozen view in memory only | Accepted |
-| [0027](0027-system-txt-timing.md) | When system.txt is rendered | Accepted |
+| [0027](0027-system-txt-timing.md) | When system.txt is rendered | Superseded by ADR-0063 |
 | [0028](0028-pending-batch-survives-a-restart.md) | Pending merges survive a restart | Accepted |
-| [0029](0029-merge-task-input-lines.md) | Merge task input lines | Accepted |
+| [0029](0029-merge-task-input-lines.md) | Merge task input lines | Superseded by ADR-0063 |
 | [0030](0030-echo-clip-marker.md) | Clip marker for tool output | Accepted |
 | [0031](0031-long-tool-call-inputs-are-split.md) | Long tool-call inputs are split | Accepted |
 | [0032](0032-subagent-native-compaction.md) | Subagents compact natively | Accepted |
@@ -44,7 +44,7 @@ A new decision gets the next number; a changed decision gets a new record, and t
 | [0034](0034-leaf-rule-is-strict.md) | Leaf rule is strict | Accepted |
 | [0035](0035-chat-placement.md) | Where </chat> goes | Accepted |
 | [0036](0036-merge-task-placeholders.md) | Merge task placeholders | Accepted |
-| [0037](0037-zoom-schema.md) | zoom schema | Accepted |
+| [0037](0037-zoom-schema.md) | zoom schema | Amended by ADR-0063 |
 | [0038](0038-effect-native-code.md) | Effect-native code | Accepted |
 | [0039](0039-error-inside-the-too-long-loop.md) | Error inside the "Too long" loop | Accepted |
 | [0040](0040-undo-drops-the-undone-turn.md) | Undo drops the undone turn **(deviation)** | Accepted, refined by ADR-0050 |
@@ -70,3 +70,4 @@ A new decision gets the next number; a changed decision gets a new record, and t
 | [0060](0060-zoom-error-lists-roots.md) | A bad zoom lists the tree's roots | Accepted |
 | [0061](0061-subagent-note-explains-the-view.md) | The subagent note explains the view | Accepted |
 | [0062](0062-imports-block-the-first-turn.md) | Imported turns block the first turn | Accepted |
+| [0063](0063-current-source-fidelity.md) | Released-source requests, independent views, scheduling, caching and indexed retention | Accepted; amends earlier recipe-era decisions |

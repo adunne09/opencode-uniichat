@@ -2,6 +2,7 @@ import type { Plugin } from "@opencode/plugin/effect";
 import { Message, type SystemPart } from "@opencode/ai";
 import { Session } from "@opencode/schema/session";
 import { Deferred, Effect } from "effect";
+import { CacheGate, cacheKeys } from "./cache.ts";
 
 // Model calls of UniiChat's own (compactions and /btw memory lookups) go through OpenCode, with the
 // user's own providers and credentials. OpenCode lets a plugin set a request's system, messages and
@@ -34,6 +35,7 @@ export interface GenerateEvent {
 export const METADATA = { uniichat: "call" } as const;
 
 export function make(ctx: Plugin.Context) {
+  const cache = new CacheGate();
   const pending = new Map<string, Call>();
   // Every throwaway session ever made, so late events about one are never taken for a subagent's.
   const known = new Set<string>();
@@ -51,15 +53,23 @@ export function make(ctx: Plugin.Context) {
       pending.delete(session.id);
       yield* ctx.session.remove({ sessionID: session.id }).pipe(Effect.ignore);
     }));
-    const started = call.started;
+    const started = call.started ?? Deferred.makeUnsafe<void>();
     if (started) {
       // Only while this call runs, and only for its provider: OpenCode wraps every request to a
       // provider that has HTTP hooks.
       yield* ctx.session.hook("http.response", (event) =>
-        event.sessionID === session.id ? Deferred.succeed(started, undefined).pipe(Effect.asVoid) : Effect.void,
+        event.sessionID === session.id && event.response.ok ? Deferred.succeed(started, undefined).pipe(Effect.asVoid) : Effect.void,
       { providerID: call.model.providerID });
     }
-    const result = yield* ctx.session.generate({ sessionID: session.id, prompt: "UniiChat" });
+    const parts = call.messages.flatMap((message) => message.content.map((part) => ({ ...part, role: message.role })));
+    const last = parts.slice(0, -1).findLastIndex((part) => "cache" in part && !!part.cache);
+    const keys = cacheKeys([call.parentID, call.model, call.options, call.system, call.tools],
+      parts.slice(0, last + 1).map((part) => {
+        const { cache: _cache, ...content } = part as typeof part & { cache?: unknown };
+        return JSON.stringify(content);
+      }));
+    const ttl = /openai/i.test(call.model.providerID) ? 1800000 : 300000;
+    const result = yield* cache.run(keys, ttl, started, ctx.session.generate({ sessionID: session.id, prompt: "UniiChat" }));
     return result.text;
   }));
 

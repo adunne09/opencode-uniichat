@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { first, last, type Ref } from "./tree.ts";
 import {
   append, bestPair, blocks, CHAT_BUDGET, COMPACTION_BUDGET, contextFor,
-  createView, deserialize, lineSize, renderLine, serialize, serializeBatch, step,
+  createView, deserialize, fit, lineSize, renderLine, serialize, serializeBatch, step,
   type Budget, type Lookup, type View,
 } from "./view.ts";
 
@@ -27,7 +27,7 @@ function push(new_state: number, states: States | null): States {
 }
 
 const built: Lookup = () => "built";
-const fixed: Lookup = (l, i) => "x".repeat(511 - renderLine([l, i], "").length);
+const fixed: Lookup = () => "x".repeat(512);
 const total = (view: View, lookup: Lookup) => view.lines.reduce((n, ref) => n + lineSize(ref, lookup(...ref)), 0);
 
 describe("view merge order", () => {
@@ -98,7 +98,7 @@ describe("view batches", () => {
   test("chat follows the 128/64 KB sawtooth", () => sawtooth(CHAT_BUDGET));
   test("compaction follows the 32/16 KB sawtooth", () => sawtooth(COMPACTION_BUDGET));
 
-  test("unbuilt parents leave a batch pending until a later append", () => {
+  test("completed parents shrink a pending oversized view without another append", () => {
     let parentsBuilt = false;
     const lookup: Lookup = (l, i) => l === 0 || parentsBuilt ? fixed(l, i) : undefined;
     const view = createView();
@@ -108,31 +108,25 @@ describe("view batches", () => {
     parentsBuilt = true;
     expect(view.size).toBe(251 * 512);
     expect(view.lines.length).toBe(251);
-    expect(append(view, 252, lookup)).toBe(true);
+    expect(fit(view, lookup)).toBe(true);
     expect(view.size).toBeLessThanOrEqual(64000);
     expect(view.pending).toBe(false);
     expect(view.size).toBe(total(view, lookup));
   });
 
-  test("step re-derives compaction from chat, not its old size", () => {
+  test("step maintains independent cuts and stops compaction at its built prefix", () => {
     const chat = createView(Array.from({ length: 250 }, (_, i): Ref => [0, i]), false, fixed);
     const comp = createView([[7, 0]], false, fixed);
-    expect(step(chat, comp, 251, fixed)).toEqual({ chatMerged: true, compMerged: true });
-    const expected = createView(chat.lines, true, fixed);
-    while (expected.lines.length * 512 > 16000) {
-      const at = bestPair(expected.lines, 251, fixed)!;
-      const [l, i] = expected.lines[at];
-      expected.lines.splice(at, 2, [l + 1, i / 2]);
-    }
-    expect(comp.lines).toEqual(expected.lines);
-    expect(comp.size).toBeLessThanOrEqual(16000);
+    expect(step(chat, comp, 251, fixed, 129)).toEqual({ chatMerged: true, compMerged: false });
+    expect(comp.lines).toEqual([[7, 0], [0, 128]]);
+    expect(comp.size).toBe(1024);
     expect(comp.size).toBe(total(comp, fixed));
     expect(comp.pending).toBe(false);
     expect(comp.lines).not.toBe(chat.lines);
     expect(comp.lines[0]).not.toBe(chat.lines[0]);
   });
 
-  test("compaction carries a re-derived batch when further parents are unbuilt", () => {
+  test("compaction carries its own pending batch when further parents are unbuilt", () => {
     const lookup: Lookup = (l, i) => l <= 1 ? fixed(l, i) : undefined;
     const chat = createView(Array.from({ length: 250 }, (_, i): Ref => [0, i]), false, lookup);
     const comp = createView();
@@ -169,32 +163,32 @@ describe("view batches", () => {
     expect(view.pending).toBe(false);
   });
 
-  test("a chat merge below 16 KB clears a stale compaction batch", () => {
+  test("each view can finish its pending batch independently", () => {
     const comp = createView([[0, 0]], true, fixed);
     // The restored chat batch needs one merge before it reaches its low bound.
     const largeLeaf: Lookup = (l) => l === 0 ? "x".repeat(40000) : "";
     const resumed = createView([[0, 0]], true, largeLeaf);
-    expect(step(resumed, comp, 2, largeLeaf)).toEqual({ chatMerged: true, compMerged: false });
+    expect(step(resumed, comp, 2, largeLeaf)).toEqual({ chatMerged: true, compMerged: true });
     expect(comp.lines).toEqual([[1, 0]]);
-    expect(comp.size).toBe(5);
+    expect(comp.size).toBe(0);
     expect(comp.pending).toBe(false);
   });
 });
 
 describe("view rendering and persistence", () => {
-  test("D21 counts UTF-8 bytes, newline flattening, and placeholders", () => {
+  test("budgets count built UTF-8 text only, excluding addresses and placeholders", () => {
     expect(renderLine([3, 5], "é\r\n猫\r🙂\nx")).toBe("40+8|é 猫 🙂 x");
-    expect(lineSize([3, 5], "é\r\n猫\r🙂\nx")).toBe(19);
+    expect(lineSize([3, 5], "é\r\n猫\r🙂\nx")).toBe(14);
     expect(renderLine([0, 0])).toBe("0+1|(not summarized yet: zoom it)");
-    expect(lineSize([0, 0])).toBe(34);
+    expect(lineSize([0, 0])).toBe(0);
     expect(renderLine([0, 0], "")).toBe("0+1|");
     let text: string | undefined;
     const lookup: Lookup = () => text;
     const view = createView([[0, 0]], false, lookup);
     text = "猫🙂";
-    expect(view.size).toBe(34);
+    expect(view.size).toBe(0);
     append(view, 2, lookup);
-    expect(view.size).toBe(24);
+    expect(view.size).toBe(14);
     expect(view.size).toBe(total(view, lookup));
   });
 
@@ -211,13 +205,14 @@ describe("view rendering and persistence", () => {
     for (let n = 0; n <= 9; n++) {
       const lines = Array.from({ length: n }, (_, i) => `L${i}`);
       const result = blocks(lines);
-      expect(result.blocks.length).toBe(Math.floor(n / 4));
-      for (let b = 0; b < result.blocks.length; b++) {
-        expect(result.blocks[b]).toBe(`${b === 0 ? "<chat>\n" : ""}${lines.slice(b * 4, b * 4 + 4).join("\n")}\n`);
+      expect(result.blocks.length).toBe(1 + Math.floor(n / 4));
+      expect(result.blocks[0]).toBe("<chat>\n");
+      for (let b = 1; b < result.blocks.length; b++) {
+        expect(result.blocks[b]).toBe(`${lines.slice((b - 1) * 4, b * 4).join("\n")}\n`);
       }
       const rest = lines.slice(Math.floor(n / 4) * 4);
-      expect(result.tail).toBe(`${n < 4 ? "<chat>\n" : ""}${rest.map((line) => `${line}\n`).join("")}</chat>`);
-      expect([...result.blocks, result.tail].join("")).toBe(`<chat>\n${lines.map((line) => `${line}\n`).join("")}</chat>`);
+      expect(result.tail).toBe(`${rest.map((line) => `${line}\n`).join("")}</chat>\n`);
+      expect([...result.blocks, result.tail].join("")).toBe(`<chat>\n${lines.map((line) => `${line}\n`).join("")}</chat>\n`);
     }
   });
 

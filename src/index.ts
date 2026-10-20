@@ -21,7 +21,7 @@ import { btwMemory, lookupCalls, lookupResults, systemText, stateText, ZOOM_DESC
 import { UniiChatRpc, statusValue } from "./rpc.ts";
 
 export class IntegrationError extends Data.TaggedError("UniiChatIntegrationError")<{ message: string }> {}
-type Chat = Pick<engine.Chat, "log" | "logAgent" | "agentName" | "system" | "setSystem" | "setTools" | "awaitSummarized" | "renderView" | "zoom" | "date" | "status" | "latestSource" | "undoneFrom" | "rewind">;
+type Chat = Pick<engine.Chat, "log" | "logAgent" | "agentName" | "system" | "setSystem" | "setTools" | "awaitSummarized" | "renderView" | "zoom" | "date" | "status" | "latestSource" | "undoneFrom" | "rewind"> & Partial<Pick<engine.Chat, "hasSource">>;
 export interface IntegrationOptions {
   /** Plugin options; defaults to `ctx.options`. */
   options?: unknown;
@@ -112,7 +112,11 @@ export function restoreTurn(rows: readonly history.Row[], messages: readonly Mes
 
 export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {}) => Effect.gen(function* () {
   const settings = config.parse(options.options ?? ctx.options);
-  config.configure(settings);
+  const chats = engine.registry();
+  yield* Effect.addFinalizer(() => chats.close());
+  yield* Effect.gen(function* () {
+    while (true) { yield* Effect.sleep(60000); yield* chats.retry(); }
+  }).pipe(Effect.forkScoped);
   const transport = options.transport ?? transports.make(ctx);
   // The compaction model: the configured one, else the newest Anthropic Claude Haiku OpenCode lists.
   let chosen: compactor.Model | undefined;
@@ -124,6 +128,7 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
     return chosen = { providerID: "anthropic", id: haiku.modelID, ...(settings.compaction.variant ? { variant: settings.compaction.variant } : {}) };
   });
   const depsFor = (sessionID: string): engine.Deps => ({
+    settings: config.engineSettings(settings),
     compact: (input) => Effect.gen(function* () {
       const model = yield* compactionModel;
       const providerOptions = settings.compaction.providerOptions ?? {};
@@ -133,7 +138,7 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
       });
     }),
   });
-  const get = (sessionID: string) => (options.get ?? engine.get)(sessionID, depsFor(sessionID));
+  const get = (sessionID: string) => (options.get ?? chats.get)(sessionID, depsFor(sessionID));
   const state = (sessionID: string) => ctx.storage.get(`session/${sessionID}`).pipe(Effect.map((value): turn.Switch => {
     // A session never switched follows the defaultOn option.
     if (!value || typeof value !== "object" || Array.isArray(value)) return settings.defaultOn ? { on: true, render: true } : { on: false };
@@ -181,22 +186,23 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
       for (const src of persisted) index.sources.add(src);
       return yield* Effect.failCause(result.cause);
     }
-    for (const item of items) index.sources.add(item.src.split(":")[0]!);
+    if (!chat.hasSource) for (const item of items) index.sources.add(item.src.split(":")[0]!);
   });
   const reconcile = Effect.fn(function* (sessionID: string, chat: Chat, rows: readonly history.Row[], current: boolean, excluded: ReadonlySet<string> = new Set()) {
     let index = indexes.get(sessionID);
     if (!index) {
-      index = { sources: yield* (options.sources ?? sources)(sessionID), recovered: false };
+      index = { sources: chat.hasSource ? new Set() : yield* (options.sources ?? sources)(sessionID), recovered: false };
       indexes.set(sessionID, index);
     }
-    const has = (row: history.Row) => index!.sources.has(row.id) || (row.type === "assistant" && row.content.some((part) => part.type === "tool" && index!.sources.has(part.id)));
+    const recordedSource = (id: string) => chat.hasSource ? chat.hasSource(id) : index!.sources.has(id);
+    const has = (row: history.Row) => recordedSource(row.id) || (row.type === "assistant" && row.content.some((part) => part.type === "tool" && recordedSource(part.id)));
     const selected = (rows: readonly history.Row[], current: boolean) => {
       const parts = history.segments(rows);
       const recorded = new Set(parts.filter((part) => part.rows.some(has)).flatMap((part) => [...part.ids]));
       return history.selectLogged(parts, (id) => recorded.has(id), current);
     };
     if (!index.recovered) {
-      if (index.sources.size === 0) {
+      if (chat.latestSource() === undefined && index.sources.size === 0) {
         // First switch-on: an empty store means earlier turns of this session ran vanilla.
         // Import them, from before any native compaction checkpoint when the full list is reachable,
         // so memory starts at the start of the session rather than at /unii on.
@@ -244,7 +250,7 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
     if (k === undefined) {
       // The context starts at a compaction checkpoint and holds no logged message, so the undo
       // anchor (the latest logged message still in the session) is further back: page for it.
-      const logged = indexes.get(sessionID)?.sources ?? (yield* (options.sources ?? sources)(sessionID));
+      const logged = chat.hasSource ? { has: (id: string) => chat.hasSource!(id) } : indexes.get(sessionID)?.sources ?? (yield* (options.sources ?? sources)(sessionID));
       const has = (row: history.Row) => logged.has(row.id) || (row.type === "assistant" && row.content.some((part) => part.type === "tool" && logged.has(part.id)));
       const full = yield* (options.older ?? older)(sessionID, has).pipe(
         Effect.catchCause((cause) => Effect.logWarning("UniiChat undo check could not read the session past its checkpoint", cause).pipe(Effect.as(undefined))),
@@ -292,12 +298,15 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
     const current = parts.at(-1)!;
     const first = decision.first || memo.frozen === undefined;
     if (child) {
-      if (decision.first || !memo.frozen) memo.frozen = chat.renderView();
+      if (decision.first || !memo.frozen) {
+        yield* chat.awaitSummarized();
+        memo.frozen = chat.renderView();
+      }
       const name = chat.agentName(sessionID, event.agent);
       yield* chat.logAgent(name, turn.childItems(sessionID, history.items(rows, { name: (childID) => nameFor(chat, rows, childID) })));
     } else {
-      if (first && (switchState.render || chat.system() === undefined)) {
-        yield* chat.setSystem(systemText(settings.prompts.system, history.extractCatalog(event.system), yield* env.agentsMd(location), history.extractSkills(event.system)));
+      if (first) {
+        yield* chat.setSystem(systemText(settings.prompts.system, history.extractCatalog(event.system), yield* env.agentsMd({ ...location, paths: history.instructionPaths(rows, event.system) }), history.extractSkills(event.system)));
         yield* ctx.storage.set(`session/${sessionID}`, { on: switchState.on });
       }
       yield* chat.setTools(Object.entries(event.tools).map(([name, tool]) => ({ name, ...tool })));
@@ -345,7 +354,7 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
       if (calls.length === 0) break;
       const results: { call: string; text: string }[] = [];
       for (const call of calls) {
-        const text = yield* (call.name === "zoom" ? chat.zoom(call.id, call.n) : chat.date(call.id as number)).pipe(
+        const text = yield* (call.name === "zoom" ? chat.zoom(call.id, call.n, call.at) : chat.date(call.id as number)).pipe(
           Effect.map((result) => result.text),
           Effect.catchCause((cause) => Effect.succeed(`Error: ${Cause.pretty(cause)}`)),
         );
@@ -404,11 +413,11 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
   yield* ctx.tool.transform((editor) => {
     editor.add({
       name: "zoom", description: ZOOM_DESCRIPTION, options: { codemode: false },
-      input: { type: "object", properties: { id: { anyOf: [{ type: "integer" }, { type: "string" }] }, n: { type: "integer" } }, required: ["id"], additionalProperties: false },
+      input: { type: "object", properties: { id: { anyOf: [{ type: "integer" }, { type: "string" }] }, n: { type: "integer", minimum: 1, default: 1 }, at: { type: "integer", minimum: 0, default: 0 } }, required: ["id"], additionalProperties: false },
       execute: (input, context) => toolResult(Effect.gen(function* () {
-        const args = input as { id: number | string; n?: number };
+        const args = input as { id: number | string; n?: number; at?: number };
         const chat = yield* get(yield* target(context.sessionID));
-        return yield* chat.zoom(args.id, args.n);
+        return yield* chat.zoom(args.id, args.n, args.at);
       })),
     });
     editor.add({
@@ -431,11 +440,11 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
     }).pipe(Effect.orDie),
     view: ({ sessionID }) => Effect.gen(function* () {
       const view = (yield* get(yield* target(sessionID))).renderView();
-      return [...view.blocks, view.tail].join("").replace(/^<chat>\n/, "").replace(/\n?<\/chat>$/, "").split("\n").filter(Boolean);
+      return [...view.blocks, view.tail].join("").replace(/^<chat>\n/, "").replace(/\n?<\/chat>\n?$/, "").split("\n").filter(Boolean);
     }).pipe(Effect.orDie),
     archive: (input) => Effect.gen(function* () {
       const chat = yield* get(yield* target(input.sessionID));
-      return (yield* ("name" in input ? chat.zoom(input.name) : chat.zoom(input.id, input.n))).text;
+      return (yield* ("name" in input ? chat.zoom(input.name, 1, input.at) : chat.zoom(input.id, input.n, input.at))).text;
     }).pipe(Effect.orDie),
   });
   yield* ctx.event.subscribe().pipe(Stream.runForEach((event) => {

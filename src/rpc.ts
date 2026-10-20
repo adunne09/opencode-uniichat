@@ -56,8 +56,8 @@ export const UniiChatRpc = Rpc.define({
     view: { input: session, output: z.array(z.string()) },
     archive: {
       input: z.union([
-        session.extend({ id: z.number().int().nonnegative(), n: z.number().int().positive() }),
-        session.extend({ name: z.string() }),
+        session.extend({ id: z.number().int().nonnegative(), n: z.number().int().positive(), at: z.number().int().nonnegative().optional() }),
+        session.extend({ name: z.string(), at: z.number().int().nonnegative().optional() }),
       ]),
       output: z.string(),
     },

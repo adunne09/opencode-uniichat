@@ -1,8 +1,8 @@
 # UniiChat for OpenCode
 
-**This plugin implements Victor Taelin's UniiChat recipe: [UniiChat: one chat that never ends](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449).**
+**This plugin adapts [Victor Taelin's UniiChat](https://github.com/VictorTaelin/UniiChat) to OpenCode.**
 
-This plugin follows the recipe as closely as OpenCode allows, and the [deviations](#deviations-from-the-recipe) are listed below. The code follows the recipe at revision [`3c190e0`](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449/3c190e06f34aba0c69f49042c526093269604935) (Oct 8, 2026).
+The released implementation is authoritative where it differs from the original [recipe](https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449). Source-aligned behavior is pinned to UniiChat commit `0500bf6a8ea4bf0ce047488562022b1b6532cc30` (Oct 20, 2026); see [ADR-0063](docs/adr/0063-current-source-fidelity.md) for the port's boundaries.
 
 The recipe's idea in one line: the chat itself is the memory. Every message is logged word for word. A cheap model compresses the log into a binary tree of one-line summaries, and each turn starts a fresh call that sees a fixed-size **view** of that tree. When a line is too vague, the model **zooms** into the lines it was made from, down to the message itself. The context stays the same size and nothing is lost.
 
@@ -18,7 +18,7 @@ UniiChat is switched on per session and is off by default (opt-in via `/unii on`
 - Subagents always run in the background, and their reports come back as `work` messages.
 - `/btw` answers from Unii's memory instead of the full transcript.
 
-Memory is stored under `<OpenCode data dir>/uniichat/<sessionID>/`, normally `~/.local/share/opencode/uniichat/`, in the recipe's file layout.
+Memory is stored under `<OpenCode data dir>/uniichat/<sessionID>/`, normally `~/.local/share/opencode/uniichat/`. JSONL logs and attachments remain authoritative. A disposable `archive.index.sqlite` indexes record locations, source IDs, and ready tree nodes; legacy logs are indexed automatically. The engine reads history on demand and retains a bounded node cache instead of loading all log bodies.
 
 ## Install
 
@@ -43,16 +43,18 @@ Or add it by hand. The server part goes in `opencode.json(c)` and the terminal U
 
 - `/unii on` switches UniiChat on for the current session, starting at the next turn. With no session open, it starts a new session with UniiChat on. The first time, the session's earlier turns are imported into memory.
 - `/unii off` returns the session to vanilla OpenCode. Memory is kept, and `/unii on` resumes it.
-- `/unii` opens the memory popup. It shows the status and the live view. Up/Down move, Enter or a click zooms into a line, and Esc goes back and then closes.
+- `/unii` opens the memory popup. Up/Down move, Enter or a click zooms into a line, `n` opens the next archive page when available, and Esc goes back and then closes.
 - The sidebar shows whether UniiChat is on, and `· compaction error (/unii)` when a compaction failed. The popup shows the error.
 
-The system prompt (with AGENTS.md, the skills list and the Code Mode catalog) is frozen at `/unii on`. To pick up edits, run `/unii off` and then `/unii on`.
+The system prompt, loaded instruction files, skills list and Code Mode catalog refresh at each new turn. Dynamic system notices remain in the outgoing request. A subagent waits for the parent's summaries before freezing its memory view.
+
+`zoom(id)` defaults to the original message (`n = 1`). Long messages and named agent archives return pages of up to 30,000 characters, with a continuation offset: `zoom(id, n, at)` or `zoom("agent-name", 1, at)`. Attachments accompany the first message page only.
 
 ## Options
 
 All options are optional ;)
 
-They go in the plugin's `options` object. The defaults are the recipe's values.
+They go in the plugin's `options` object. Settings are isolated per plugin instance.
 
 
 | Option | Default | What it does |
@@ -60,13 +62,13 @@ They go in the plugin's `options` object. The defaults are the recipe's values.
 | `defaultOn` | `false` | Sessions never switched on or off start with UniiChat on. |
 | `compaction.model` | newest `anthropic/claude-haiku-*` | Compaction model, as `"providerID/modelID"`. |
 | `compaction.variant` | `"high"` | Model variant, as OpenCode names them. |
-| `compaction.maxTokens` | `32000` | Output limit for one compaction call. |
+| `compaction.maxTokens` | `128000` | Output-token ceiling for one tool-free compaction call; the summary target remains 512 UTF-8 bytes. |
 | `compaction.providerOptions` | `{}` | Extra provider options sent with each compaction call. |
 | `compaction.timeoutMs` | `240000` | A call with no answer by then fails, and is retried. |
 | `compaction.tries` | `5` | Tries per node in the "Too long" loop. |
-| `compaction.concurrency` | `8` | Compaction calls in flight at once. |
+| `compaction.concurrency` | `64` | Compaction calls in flight and the pending-leaf window. Leaves and merges are ordered by context endpoint, merges first at ties. |
 | `view.chat` | `{ "high": 128000, "low": 64000 }` | Chat view byte budget: when it passes `high`, it is merged down to `low`. |
-| `view.compaction` | `{ "high": 32000, "low": 16000 }` | Compaction view byte budget. |
+| `view.compaction` | `{ "high": 32000, "low": 16000 }` | Independent compaction view budget, covering only the completed leaf prefix. |
 | `btw.lookupSteps` | `8` | Memory lookups (zoom/date) allowed before a `/btw` answer. `0` answers from the view only. |
 | `btw.maxTokens` | `4000` | Output limit for one lookup call. |
 | `prompts.system` | the recipe's prompt, agent name "Unii" | The system prompt. Your AGENTS.md, the skills list and the Code Mode catalog are added to it. |
@@ -76,7 +78,7 @@ They go in the plugin's `options` object. The defaults are the recipe's values.
 | `tui.sidebar` | `true` | Show the sidebar line. Set it in `cli.json`. |
 
 
-Prompts are plain strings. A prompt change reaches a session at its next `/unii on`.
+Prompts are plain strings. After plugin reload, changes reach sessions at their next turn. View budgets count built node text in UTF-8 bytes, excluding addresses and placeholders. Background completion publishes a merge batch once it reaches `low` or removes at least `high` bytes; a new append may advance a partial batch.
 
 ## Deviations from the recipe
 
@@ -91,7 +93,7 @@ Each one is an [architecture decision record](docs/adr/README.md).
 7. **No lock on the log** ([0041](docs/adr/0041-drop-chat-lock.md)). The recipe says "hold a lock". A session is never open in two OpenCode servers at once, so the lock was redundant.
 8. **Subagents keep their own system prompt** ([0015](docs/adr/0015-subagent-system-prompt.md)). The recipe makes a subagent a fresh call that starts with the view. Here a subagent also keeps its OpenCode agent's prompt, plus a note about the view.
 9. **Undo removes messages from memory** ([0040](docs/adr/0040-undo-drops-the-undone-turn.md), [0050](docs/adr/0050-undo-behind-checkpoint.md)). The recipe says never delete a line. OpenCode's `/undo` deletes messages, so the undone records are moved to `undone/<stamp>/` and their ids are reused.
-10. **User-run shell commands are not logged** ([0025](docs/adr/0025-shell-messages.md)).
+10. **User-run shell results are logged as echoes**, using the same clipping policy as other tool output ([0063](docs/adr/0063-current-source-fidelity.md), superseding [0025](docs/adr/0025-shell-messages.md)).
 11. **Earlier turns are imported as messages** ([0043](docs/adr/0043-import-earlier-turns.md)). When a session is switched on mid-way, its earlier turns are logged as ordinary messages, not as `note` memories.
 
 These are additions the recipe does not cover:
@@ -110,6 +112,7 @@ Victor has since released his code, [VictorTaelin/UniiChat](https://github.com/V
 - a bad zoom lists the tree's roots ([0060](docs/adr/0060-zoom-error-lists-roots.md))
 - the subagent note explains the view ([0061](docs/adr/0061-subagent-note-explains-the-view.md))
 - options ([0054](docs/adr/0054-plugin-options.md))
+- tool-free 128k-token compaction, unheaded merge inputs, explicit turn heading, refreshed rules, subagent readiness, paginated zoom, independent background-maintained views, endpoint scheduling, TTL cache single-flight, and indexed bounded-retention storage ([0063](docs/adr/0063-current-source-fidelity.md))
 
 One difference from that code is kept on purpose. Victor's turns don't wait for an import to be summarized. Here the first turn after switch-on waits, so the model sees the whole session ([0062](docs/adr/0062-imports-block-the-first-turn.md)).
 
@@ -117,8 +120,10 @@ One difference from that code is kept on purpose. Victor's turns don't wait for 
 
 - OpenCode's generate API returns text only. The popup shows compaction call counts and times, but not token usage or cost. When a compaction returns no text, the reason is not reported; the node uses its source clipped.
 - A compaction's throwaway session may show briefly as a child session.
+- Cache single-flight covers plugin-owned model calls. It waits for successful HTTP response headers, or successful completion on transports without HTTP hooks; native provider cache reuse is not measured by this plugin.
+- Indexed logs bound retained history bodies; OpenCode still owns the full transcript and the current raw turn. Imported earlier turns use the same queue as live history, rather than UniiChat's separate billing/import lanes.
 - If a single turn outgrows the model's context window, the request fails (recipe-strict, [0008](docs/adr/0008-raw-turn-overflow.md)).
-- Tested on Linux with Bun 1.4.
+- Tested with Bun 1.4, including macOS regression coverage.
 
 ## Development
 

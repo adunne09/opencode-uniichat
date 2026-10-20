@@ -33,7 +33,7 @@ export const generate = Effect.fn("UniiChat.compact")(function* (transport: Tran
     model: input.model,
     system: input.system,
     messages: input.turns.map((turn) => textMessage(turn.role, turn.parts)),
-    tools: input.tools.map((tool) => tool.name),
+    tools: [],
     options: input.options,
     ...(input.started ? { started: input.started } : {}),
   });

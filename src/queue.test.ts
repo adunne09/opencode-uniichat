@@ -18,7 +18,7 @@ function committedDrain(q: WorkQueue, fits: (ref: Ref) => string | undefined, sl
 
 describe("work scheduler", () => {
   test("holds fitting leaves behind the eight-leaf window", () => {
-    const q = new WorkQueue(12);
+    const q = new WorkQueue(12, [], 8);
     expect(q.drain(noFit, 8).start).toEqual(Array.from({ length: 8 }, (_, i) => [0, i]));
     expect(q.drain(() => "short", 0).instant).toEqual([]);
     q.built([0, 7]);
@@ -27,16 +27,16 @@ describe("work scheduler", () => {
   }, timeout);
 
   test("caps calls at eight across drains even with excess free slots", () => {
-    const q = WorkQueue.restore(20, [[0, 0], [0, 1]]);
+    const q = WorkQueue.restore(20, [[0, 0], [0, 1]], 8);
     expect(q.drain(noFit, 100).start).toHaveLength(8);
     expect(q.drain(noFit, 100).start).toEqual([]);
     q.built([0, 2]);
-    expect(q.drain(noFit, 100).start).toEqual([[0, 10]]);
+    expect(q.drain(noFit, 100).start).toEqual([[0, 9]]);
   }, timeout);
 
-  test("starts oldest leaves before oldest ready merges", () => {
+  test("orders leaves and merges by context end, merge first at a tie", () => {
     const q = WorkQueue.restore(7, [[0, 3], [0, 2], [0, 1], [0, 0]]);
-    expect(q.drain(noFit, 8).start).toEqual([[0, 4], [0, 5], [0, 6], [1, 0], [1, 1]]);
+    expect(q.drain(noFit, 8).start).toEqual([[1, 0], [1, 1], [0, 4], [0, 5], [0, 6]]);
   }, timeout);
 
   test("retries old leaves before new leaves and merges", () => {
@@ -48,7 +48,7 @@ describe("work scheduler", () => {
     q.failed([0, 2]);
     q.append(5);
     q.retryFailed();
-    expect(q.drain(noFit, 8).start).toEqual([[0, 2], [0, 3], [0, 4], [1, 0]]);
+    expect(q.drain(noFit, 8).start).toEqual([[1, 0], [0, 2], [0, 3], [0, 4]]);
   }, timeout);
 
   test("instant nodes use no slot and complete all merge levels", () => {
@@ -81,8 +81,8 @@ describe("work scheduler", () => {
     const q = WorkQueue.restore(5, [[0, 0], [0, 1], [0, 2], [0, 3]]);
     const work = q.drain((ref) => id(ref) === "1:1" ? "short" : undefined, 0);
     expect(work).toEqual({ instant: [[[1, 1], "short"]], start: [] });
-    expect(q.drain(noFit, 1).start).toEqual([[0, 4]]);
     expect(q.drain(noFit, 1).start).toEqual([[1, 0]]);
+    expect(q.drain(noFit, 1).start).toEqual([[0, 4]]);
   }, timeout);
 
   test("merges wait for both halves and build only once", () => {
@@ -100,7 +100,7 @@ describe("work scheduler", () => {
   }, timeout);
 
   test("failed leaves keep the window full until they build", () => {
-    const q = new WorkQueue(10);
+    const q = new WorkQueue(10, [], 8);
     const work = q.drain(noFit, 8);
     for (const ref of work.start) q.failed(ref);
     expect(q.drain(() => "short", 8).instant).toEqual([]);
@@ -143,12 +143,12 @@ describe("work scheduler", () => {
       expect(q.drain(fits, 0)).toEqual({ instant: [], start: [] });
     }
     expect(visits).toBe(3);
-    expect(q.drain(fits, 1).start).toEqual([[0, 4]]);
     expect(q.drain(fits, 1).start).toEqual([[1, 0]]);
+    expect(q.drain(fits, 1).start).toEqual([[1, 1]]);
     expect(visits).toBe(3);
   }, timeout);
 
-  test("large restore classifies each merge once and idle drains leave calls queued", () => {
+  test("large restore classifies only a bounded ready window", () => {
     const leaves: Ref[] = Array.from({ length: 10_000 }, (_, i) => [0, i]);
     const q = WorkQueue.restore(leaves.length, leaves);
     const visits = new Map<string, number>();
@@ -158,7 +158,7 @@ describe("work scheduler", () => {
       return undefined;
     };
     expect(q.drain(fits, 0)).toEqual({ instant: [], start: [] });
-    expect(visits.size).toBe(5_000);
+    expect(visits.size).toBe(64);
     for (let i = 0; i < 1_000; i++) {
       expect(q.drain(fits, 0)).toEqual({ instant: [], start: [] });
     }
@@ -169,7 +169,7 @@ describe("work scheduler", () => {
     q.built([1, 1]);
     expect(q.drain(fits, 0)).toEqual({ instant: [], start: [] });
     expect(visits.get("2:0")).toBe(1);
-    expect(visits.size).toBe(5_001);
+    expect(visits.size).toBe(66);
     expect(q.drain(fits, 1).start).toEqual([[2, 0]]);
     for (let i = 0; i < 100; i++) {
       q.drain(fits, 0);
@@ -222,7 +222,7 @@ describe("work scheduler", () => {
       seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
       return seed / 2 ** 32;
     };
-    const q = new WorkQueue();
+    const q = new WorkQueue(0, [], 8);
     const built = new Set<string>();
     const running: Ref[] = [];
     const fitting = new Map<string, boolean>();

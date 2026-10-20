@@ -1,8 +1,6 @@
 import { z } from "zod";
 import { BTW_LOOKUP_NOTE, SUBAGENT_NOTE, SYSTEM_PROMPT } from "./prompts.ts";
-import { COMPACTION } from "./chat.ts";
-import { QUEUE } from "./queue.ts";
-import { CHAT_BUDGET, COMPACTION_BUDGET } from "./view.ts";
+import type { EngineSettings } from "./settings.ts";
 
 // Plugin options, from the `options` object of the plugin's entry in opencode.json(c):
 //   "plugins": [{ "package": "github:maxandron/opencode-uniichat", "options": { ... } }]
@@ -20,7 +18,7 @@ export const Schema = z.object({
     /** A model variant as OpenCode names them. */
     variant: z.string().default("high"),
     /** Output token limit for one compaction call. */
-    maxTokens: positive.default(32000),
+    maxTokens: positive.default(128000),
     /** Extra provider options sent with each compaction call. */
     providerOptions: z.record(z.string(), z.unknown()).optional(),
     /** A call that has not answered by then fails and is retried. */
@@ -28,7 +26,7 @@ export const Schema = z.object({
     /** Tries per node in the recipe's "Too long" loop. */
     tries: positive.default(5),
     /** Compaction calls in flight at once. */
-    concurrency: positive.default(8),
+    concurrency: positive.default(64),
   }).prefault({}),
   view: z.object({
     /** Chat view byte budget: merge down to `low` when it passes `high` (recipe: 128000/64000). */
@@ -72,11 +70,9 @@ export function modelRef(spec: string, variant?: string) {
   return { providerID: spec.slice(0, at), id: spec.slice(at + 1), ...(variant ? { variant } : {}) };
 }
 
-/** Applies the process-wide settings that the recipe's engine reads. */
-export function configure(options: Options) {
-  Object.assign(CHAT_BUDGET, options.view.chat);
-  Object.assign(COMPACTION_BUDGET, options.view.compaction);
-  COMPACTION.timeoutMs = options.compaction.timeoutMs;
-  COMPACTION.tries = options.compaction.tries;
-  QUEUE.slots = options.compaction.concurrency;
-}
+/** Settings belong to the plugin instance, never process-global mutable state. */
+export const engineSettings = (options: Options): EngineSettings => ({
+  concurrency: options.compaction.concurrency, tries: options.compaction.tries,
+  timeoutMs: options.compaction.timeoutMs,
+  chat: { ...options.view.chat }, compaction: { ...options.view.compaction },
+});

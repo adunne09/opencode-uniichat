@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { Deferred, Effect } from "effect";
 import { COMPACTION } from "./chat.ts";
-import { configure, modelRef, parse } from "./options.ts";
+import { engineSettings, modelRef, parse } from "./options.ts";
 import { lookupCalls, lookupResults } from "./prompts.ts";
 import { QUEUE } from "./queue.ts";
 import { make, type GenerateEvent } from "./transport.ts";
 import { CHAT_BUDGET, COMPACTION_BUDGET } from "./view.ts";
+import { generate } from "./compactor.ts";
 
 describe("options", () => {
   test("rejects bad values with the option's path", () => {
@@ -13,19 +14,14 @@ describe("options", () => {
     expect(() => parse({ view: { chat: { high: 10, low: 20 } } })).toThrow("view.chat");
   });
 
-  test("configure sets the engine's process-wide settings", () => {
-    const saved = { chat: { ...CHAT_BUDGET }, comp: { ...COMPACTION_BUDGET }, compaction: { ...COMPACTION }, slots: QUEUE.slots };
-    try {
-      configure(parse({ view: { chat: { high: 2000, low: 1000 } }, compaction: { timeoutMs: 1000, tries: 2, concurrency: 3 } }));
-      expect(CHAT_BUDGET).toEqual({ high: 2000, low: 1000 });
-      expect(COMPACTION).toEqual({ timeoutMs: 1000, tries: 2 });
-      expect(QUEUE.slots).toBe(3);
-    } finally {
-      Object.assign(CHAT_BUDGET, saved.chat);
-      Object.assign(COMPACTION_BUDGET, saved.comp);
-      Object.assign(COMPACTION, saved.compaction);
-      QUEUE.slots = saved.slots;
-    }
+  test("engine settings are per instance and source defaults stay immutable", () => {
+    const settings = engineSettings(parse({ view: { chat: { high: 2000, low: 1000 } }, compaction: { timeoutMs: 1000, tries: 2, concurrency: 3 } }));
+    expect(settings).toEqual({ chat: { high: 2000, low: 1000 }, compaction: COMPACTION_BUDGET, timeoutMs: 1000, tries: 2, concurrency: 3 });
+    settings.chat.high = 3000;
+    expect(CHAT_BUDGET.high).toBe(128000);
+    expect(COMPACTION.tries).toBe(5);
+    expect(QUEUE.slots).toBe(64);
+    expect(parse({}).compaction.maxTokens).toBe(128000);
   });
 
   test("modelRef splits at the first slash", () => {
@@ -47,6 +43,18 @@ describe("/btw lookup protocol", () => {
 });
 
 describe("transport", () => {
+  test("the compactor strips every tool before reaching OpenCode", async () => {
+    let names: readonly string[] | undefined;
+    const transport: ReturnType<typeof make> = {
+      run: (call) => Effect.sync(() => { names = call.tools; return " summary "; }), apply: () => false, owns: () => false,
+    };
+    const result = await Effect.runPromise(generate(transport, {
+      parentID: "ses_chat", model: { providerID: "anthropic", id: "haiku" }, system: "rules",
+      tools: [{ name: "bash", description: "shell", input: {} }], turns: [], options: { maxTokens: parse({}).compaction.maxTokens },
+    }));
+    expect(names).toEqual([]);
+    expect(result.text).toBe("summary");
+  });
   test("runs a call in a throwaway child session and swaps in its request", async () => {
     const created: unknown[] = [];
     const removed: string[] = [];
