@@ -14,8 +14,8 @@ A new decision gets the next number; a changed decision gets a new record, and t
 | [0004](0004-compaction-transport.md) | Compaction transport | Superseded by ADR-0052 |
 | [0005](0005-cache-marks.md) | Cache marks **(deviation)** | Accepted |
 | [0006](0006-switch.md) | On/off switch per session **(deviation)** | Accepted |
-| [0007](0007-native-compaction.md) | Native compaction | Accepted, refined by ADR-0051 |
-| [0008](0008-raw-turn-overflow.md) | Raw-turn overflow | Accepted |
+| [0007](0007-native-compaction.md) | Native compaction | Accepted, refined by ADR-0051 and ADR-0065 |
+| [0008](0008-raw-turn-overflow.md) | Raw-turn overflow | Superseded by ADR-0065 |
 | [0009](0009-storage.md) | Storage | Amended by ADR-0041 and ADR-0063 |
 | [0010](0010-tools.md) | zoom and date are global tools, hidden from vanilla sessions | Accepted |
 | [0011](0011-no-capture-exclusions.md) | No capture exclusions | Accepted |
@@ -58,7 +58,7 @@ A new decision gets the next number; a changed decision gets a new record, and t
 | [0048](0048-compaction-effort-high.md) | Compaction effort high, not xhigh **(deviation)** | Accepted |
 | [0049](0049-compaction-errors-visible.md) | Show compaction errors | Accepted |
 | [0050](0050-undo-behind-checkpoint.md) | Find undone turns behind a compaction checkpoint | Accepted |
-| [0051](0051-see-past-the-stub.md) | See past UniiChat's own compaction placeholder | Accepted |
+| [0051](0051-see-past-the-stub.md) | See past UniiChat's own compaction placeholder | Accepted, amended by ADR-0065 |
 | [0052](0052-model-calls-through-opencode.md) | Model calls through OpenCode's providers **(deviation)** | Accepted |
 | [0053](0053-distribution.md) | Install from GitHub; ship the TUI prebuilt | Accepted |
 | [0054](0054-plugin-options.md) | Everything tunable is an option | Accepted |
@@ -72,3 +72,4 @@ A new decision gets the next number; a changed decision gets a new record, and t
 | [0062](0062-imports-block-the-first-turn.md) | Imported turns block the first turn | Accepted |
 | [0063](0063-current-source-fidelity.md) | Released-source requests, independent views, scheduling, caching and indexed retention | Accepted; amends earlier recipe-era decisions |
 | [0064](0064-subagent-report-and-note.md) | Subagent reports and note as in the released source | Accepted |
+| [0065](0065-turn-rollover.md) | A turn too large for its context rolls over into the view | Accepted |

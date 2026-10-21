@@ -5,6 +5,8 @@ export interface Memo {
   key: string;
   enabled: boolean;
   frozen?: { blocks: readonly string[]; tail: string };
+  /** The stub this turn last rolled over at; its view was frozen again there. */
+  rolled?: string;
 }
 
 export function enabled(state: Switch, memo?: Memo): boolean {

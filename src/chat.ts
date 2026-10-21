@@ -476,6 +476,8 @@ export class Chat {
 
   hasTools() { return this.toolsReady; }
   hasSource(base: string) { return this.archive.hasBase(base); }
+  /** The message a source was logged as (its first page); undefined if it never was. */
+  recordIndex(src: string) { return this.archive.source(src); }
   retained() { return this.archive.stats(); }
   retry() {
     const self = this;

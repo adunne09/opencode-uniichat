@@ -157,8 +157,46 @@ export function stubCut(rows: readonly Row[]): boolean {
   return false;
 }
 
-export function buildRequest(input: RequestInput): RequestMessage[] {
-  const start = input.child ? 0 : input.messages.findIndex((message) => message.id !== undefined && input.turnIds.has(message.id));
+/** The message that opened the current turn: the user's, or a report that started it. */
+export function opening(rows: readonly Row[]): Row | undefined {
+  return segments(rows).at(-1)!.rows.find((row) => row.type === "user" || row.type === "skill" ||
+    row.type === "synthetic" && row.metadata?.source === "subagent");
+}
+
+/**
+ * Where the current turn last rolled over: the latest UniiChat stub after its opening message, the
+ * point OpenCode found the turn too large for its context. Undefined if it never did, or if the rows
+ * start at the stub (the full list was unreachable) so the opening is unknown.
+ */
+export function rollover(rows: readonly Row[]): string | undefined {
+  const current = segments(rows).at(-1)!.rows;
+  const open = opening(rows);
+  const start = open === undefined ? -1 : current.indexOf(open);
+  if (start < 0) return undefined;
+  return current.slice(start + 1).findLast(isStub)?.id;
+}
+
+/**
+ * A rolled-over turn's request (UniiChat's Memory.whole, applied to a turn grown past its context):
+ * the view, now holding the turn so far, then its opening message again with a note on where its
+ * steps went, then OpenCode's messages from the stub on, without the stub's checkpoint.
+ */
+export function rolledRequest(input: RequestInput & { opening?: RequestMessage; stubs: ReadonlySet<string>; note: string }): RequestMessage[] {
+  const tail = input.messages.filter((message) => message.id === undefined || !input.stubs.has(message.id));
+  const reports = new Map(input.reports);
+  const note: ContentPart = { type: "text", text: input.note };
+  let first: RequestMessage;
+  if (input.opening === undefined) first = { role: "user", content: [note] };
+  else {
+    const report = input.opening.id === undefined ? undefined : reports.get(input.opening.id);
+    if (input.opening.id !== undefined) reports.delete(input.opening.id);
+    first = { ...input.opening, content: [...(report === undefined ? input.opening.content : [{ type: "text", text: report } as ContentPart]), note] };
+  }
+  return buildRequest({ ...input, messages: [first, ...tail], reports, from: 0 });
+}
+
+export function buildRequest(input: RequestInput & { from?: number }): RequestMessage[] {
+  const start = input.from ?? (input.child ? 0 : input.messages.findIndex((message) => message.id !== undefined && input.turnIds.has(message.id)));
   if (start < 0) throw new Error("UniiChat turn cut by an OpenCode compaction checkpoint; the current raw turn is no longer available.");
   const messages = input.messages.slice(start).map((message): RequestMessage => {
     const report = message.id === undefined ? undefined : input.reports.get(message.id);

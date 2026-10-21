@@ -17,11 +17,11 @@ import * as history from "./history.ts";
 import * as turn from "./turn.ts";
 import { toMessages } from "./messages.ts";
 import { chatDir } from "./store.ts";
-import { btwMemory, lookupCalls, lookupResults, systemText, stateText, ZOOM_DESCRIPTION, DATE_DESCRIPTION } from "./prompts.ts";
+import { btwMemory, lookupCalls, lookupResults, rolledNote, systemText, stateText, tooLargeToRepeat, WHOLE, ZOOM_DESCRIPTION, DATE_DESCRIPTION } from "./prompts.ts";
 import { UniiChatRpc, statusValue } from "./rpc.ts";
 
 export class IntegrationError extends Data.TaggedError("UniiChatIntegrationError")<{ message: string }> {}
-type Chat = Pick<engine.Chat, "log" | "logAgent" | "agentName" | "system" | "setSystem" | "setTools" | "awaitSummarized" | "renderView" | "zoom" | "date" | "status" | "latestSource" | "undoneFrom" | "rewind"> & Partial<Pick<engine.Chat, "hasSource">>;
+type Chat = Pick<engine.Chat, "log" | "logAgent" | "agentName" | "system" | "setSystem" | "setTools" | "awaitSummarized" | "renderView" | "zoom" | "date" | "status" | "latestSource" | "undoneFrom" | "rewind"> & Partial<Pick<engine.Chat, "hasSource" | "recordIndex">>;
 export interface IntegrationOptions {
   /** Plugin options; defaults to `ctx.options`. */
   options?: unknown;
@@ -108,6 +108,21 @@ export function restoreTurn(rows: readonly history.Row[], messages: readonly Mes
   const stubs = new Set(rows.filter(history.isStub).map((row) => row.id));
   const before = toMessages(rows.slice(0, at).filter((row) => row.type !== "compaction"), model);
   return [...before, ...messages.filter((message) => message.id === undefined || !stubs.has(message.id))];
+}
+
+/**
+ * What a rolled-over turn's request needs besides OpenCode's messages: its opening message (one over
+ * WHOLE bytes stands as a pointer into the view, as Memory.whole leaves it to the view), the note on
+ * where its steps went, and the stubs to drop. `rows` are the current turn's.
+ */
+export function rolledParts(chat: Partial<Pick<engine.Chat, "recordIndex">>, rows: readonly history.Row[], model: { providerID: string; id: string; variant?: string }) {
+  const open = history.opening(rows);
+  const first = open === undefined ? undefined : chat.recordIndex?.(`${open.id}:0`);
+  let opening: history.RequestMessage | undefined = open === undefined ? undefined : toMessages([open], model)[0];
+  const size = (opening?.content ?? []).reduce((n, part) => n + (part.type === "text" ? Buffer.byteLength(part.text) : 0), 0);
+  if (opening !== undefined && size > WHOLE) opening = { ...opening, content: [{ type: "text", text: tooLargeToRepeat(first) }] };
+  const stubs = new Set(rows.filter(history.isStub).map((row) => row.id));
+  return { opening, stubs, note: rolledNote(first) };
 }
 
 export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {}) => Effect.gen(function* () {
@@ -318,6 +333,14 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
         memo.frozen = chat.renderView();
       }
       yield* reconcile(sessionID, chat, rows, true);
+      // OpenCode found the turn too large and compacted (our stub): its steps so far are logged,
+      // so they go into the view, frozen again once summarized, and only what follows stays raw.
+      const rolled = history.rollover(rows);
+      if (rolled !== undefined && memo.rolled !== rolled) {
+        yield* chat.awaitSummarized();
+        memo.frozen = chat.renderView();
+        memo.rolled = rolled;
+      }
     }
     if (child) {
       // A child keeps its own agent's system prompt (D15, revised Oct 12); only a note on the view is added.
@@ -331,6 +354,13 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
     const reports = new Map(history.items(current.rows, { name: (childID) => nameFor(chat, current.rows, childID) })
       .filter((item) => item.kind === "work").map((item) => [item.src, item.text]));
     const perTurnState = child ? undefined : stateText(yield* env.stateInput(location));
+    if (!child && memo.rolled !== undefined && current.ids.has(memo.rolled)) {
+      event.messages = (yield* Effect.try({
+        try: () => history.rolledRequest({ ...rolledParts(chat, current.rows, event.model), messages: event.messages, turnIds: current.ids, view: memo.frozen!, reports, state: perTurnState }),
+        catch: error,
+      })).map((message) => Message.make(message));
+      return;
+    }
     const messages = rebuilt ? restoreTurn(rows, event.messages, event.model) : event.messages;
     event.messages = (yield* Effect.try({
       try: () => history.buildRequest({ messages, turnIds: current.ids, view: memo.frozen!, reports, child, state: perTurnState }),
@@ -381,7 +411,11 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
     const view = current.rows.length > 0 && memo?.key === history.turnKey(rows) && memo.frozen ? memo.frozen : chat.renderView();
     const reports = new Map(history.items(current.rows, { name: (childID) => nameFor(chat, current.rows, childID) })
       .filter((item) => item.kind === "work").map((item) => [item.src, item.text]));
-    const raw = rebuilt ? restoreTurn(rows, event.messages, event.model) : event.messages;
+    // A turn that rolled over holds only its steps since the stub raw; the rest is in its frozen view.
+    const rolled = memo?.key === history.turnKey(rows) && memo.rolled !== undefined && current.ids.has(memo.rolled);
+    const stubs = new Set(current.rows.filter(history.isStub).map((row) => row.id));
+    const raw = rolled ? event.messages.filter((message) => message.id === undefined || !stubs.has(message.id))
+      : rebuilt ? restoreTurn(rows, event.messages, event.model) : event.messages;
     const build = (extra?: string) => history.btwRequest({ messages: raw, turnIds: current.ids, view, reports, extra }).map((message) => Message.make(message));
     const opened = settings.btw.lookupSteps > 0
       ? yield* lookup(chat, { sessionID, model: event.model, system, messages: build(settings.prompts.btwLookup) }).pipe(

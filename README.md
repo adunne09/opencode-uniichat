@@ -122,7 +122,7 @@ One difference from that code is kept on purpose. Victor's turns don't wait for 
 - A compaction's throwaway session may show briefly as a child session.
 - Cache single-flight covers plugin-owned model calls. It waits for successful HTTP response headers, or successful completion on transports without HTTP hooks; native provider cache reuse is not measured by this plugin.
 - Indexed logs bound retained history bodies; OpenCode still owns the full transcript and the current raw turn. Imported earlier turns use the same queue as live history, rather than UniiChat's separate billing/import lanes.
-- If a single turn outgrows the model's context window, the request fails (recipe-strict, [0008](docs/adr/0008-raw-turn-overflow.md)).
+- A turn that outgrows the model's context rolls over: when OpenCode asks to compact it, its steps so far move into the view as summaries and only later steps stay raw ([0065](docs/adr/0065-turn-rollover.md)). OpenCode decides when, from the last request it sent, so a first request already over the limit still fails.
 - Tested with Bun 1.4, including macOS regression coverage.
 
 ## Development

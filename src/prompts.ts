@@ -215,6 +215,21 @@ export function btwMemory(opened: readonly { call: string; text: string }[]) {
 }
 
 export const TURN_HEAD = "Turn: the user's new message:\n\n";
+
+/** The most bytes of a turn's messages a request holds whole (UniiChat's Memory.ts HIGH, as Memory.whole uses it). */
+export const WHOLE = 128000;
+
+/** Closes a rolled-over turn's opening message: where the turn's steps so far went. */
+export function rolledNote(first?: number) {
+  const where = first === undefined ? "its last lines" : `its lines from message ${first} on`;
+  return `\n\n[This turn grew too large for one request, so it goes on in a fresh one: all it did so far is now in the view above, as ${where}, and only the steps since follow here. Zoom those lines for anything you need whole, then go on.]`;
+}
+
+/** Stands in for an opening message over WHOLE bytes, which only the view and zoom then hold. */
+export function tooLargeToRepeat(first?: number) {
+  const where = first === undefined ? "near the view's end" : `from message ${first} on`;
+  return `(The user's message is too large to repeat here: it is in the view above, ${where}. Zoom it for the parts you need.)`;
+}
 export const ZOOM_DESCRIPTION = "Open id+n into its two children; n defaults to 1 for the original message with attachments. A subagent name as id opens its chat. Long text is paginated: pass the character offset at shown by the previous page.";
 export const DATE_DESCRIPTION = "The date and time of message id.";
 

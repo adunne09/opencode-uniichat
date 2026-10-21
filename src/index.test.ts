@@ -451,9 +451,10 @@ test("an undo before a compaction checkpoint is found in the full message list",
   })));
 });
 
-test("a UniiChat compaction stub mid-turn: the turn is rebuilt from the full message list", async () => {
+test("a turn OpenCode finds too large rolls over: its steps go to the view, only those since stay raw", async () => {
   const reply = (id: string, text: string): Row => ({ type: "assistant", id, content: [{ type: "text", text }], agent: "build", model: { id: "model", providerID: "anthropic" }, time: { created: 1001 } });
   const stub: Row = { type: "compaction", id: "msg_stub", status: "completed", reason: "auto", summary: "UniiChat is on; native compaction is skipped.", metadata: { uniichat: "skipped" }, time: { created: 1002 } };
+  const checkpoint = Message.make({ id: "msg_stub", role: "user", content: [{ type: "text", text: "<conversation-checkpoint>" }] });
   const f = fixture([user("msg_old"), idle("msg_idle"), user("msg_new")]);
   await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
     yield* integrate(f.ctx, f.options);
@@ -469,18 +470,46 @@ test("a UniiChat compaction stub mid-turn: the turn is rebuilt from the full mes
       for (const row of [...all].reverse()) { out.push(row); if (has(row)) break; }
       return out.reverse();
     });
-    const next = f.event([Message.make({ id: "msg_stub", role: "user", content: [{ type: "text", text: "<conversation-checkpoint>" }] }), msg("assistant", "step 2", "msg_r2")]);
+    let waits = 0;
+    f.chat.awaitSummarized = () => Effect.sync(() => { waits++; });
+    f.lines(["0+1|old", "1+1|task", "2+1|step 1"]);
+    const next = f.event([checkpoint, msg("assistant", "step 2", "msg_r2")]);
     yield* f.hooks.get("context")!(next);
-    expect(next.messages.map((message) => message.id)).toEqual(["msg_new", "msg_r1", "msg_r2"]);
+    expect(f.logged.map((item) => item.text)).toContain("step 1");
+    expect(waits).toBe(1);
+    expect(next.messages.map((message) => message.id)).toEqual(["msg_new", "msg_r2"]);
     const texts = next.messages.map((message) => message.content.flatMap((part) => part.type === "text" ? [part.text] : []));
-    expect(texts[0]!.at(-1)).toBe("task");
-    expect(texts[0]!.join("")).toContain("0+1|old");
-    expect(texts.flat().some((text) => text.includes("conversation-checkpoint"))).toBe(false);
+    expect(texts[0]!.join("")).toContain("2+1|step 1");
+    expect(texts[0]!).toContain("Turn: the user's new message:\n\n");
+    expect(texts[0]!).toContain("task");
+    expect(texts[0]!.at(-1)).toContain("grew too large for one request");
+    expect(texts.flat().some((text) => text.includes("conversation-checkpoint") || text === "step 1")).toBe(false);
+    // Later steps of the same turn keep that view.
+    f.lines(["changed"]);
+    yield* f.hooks.get("context")!(f.event([checkpoint, msg("assistant", "step 2", "msg_r2")]));
+    expect(waits).toBe(1);
     // Unreachable full list: no throw, the request starts at the stub's checkpoint.
     f.options.older = () => Effect.succeed(undefined);
-    const fallback = f.event([Message.make({ id: "msg_stub", role: "user", content: [{ type: "text", text: "<conversation-checkpoint>" }] }), msg("assistant", "step 2", "msg_r2")]);
+    const fallback = f.event([checkpoint, msg("assistant", "step 2", "msg_r2")]);
     yield* f.hooks.get("context")!(fallback);
     expect(fallback.messages[0]!.id).toBe("msg_stub");
+  })));
+});
+
+test("a rolled-over turn's opening message over 128 KB is left to the view", async () => {
+  const stub: Row = { type: "compaction", id: "msg_stub", status: "completed", reason: "auto", summary: "UniiChat is on; native compaction is skipped.", metadata: { uniichat: "skipped" }, time: { created: 1002 } };
+  const huge = "x".repeat(130_000);
+  const f = fixture([user("msg_new", huge)]);
+  await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+    yield* integrate(f.ctx, f.options);
+    yield* f.hooks.get("context")!(f.event([msg("user", huge, "msg_new")]));
+    f.rows([stub]);
+    f.options.older = () => Effect.succeed([user("msg_new", huge), stub]);
+    const next = f.event([Message.make({ id: "msg_stub", role: "user", content: [{ type: "text", text: "<conversation-checkpoint>" }] })]);
+    yield* f.hooks.get("context")!(next);
+    const texts = next.messages[0]!.content.flatMap((part) => part.type === "text" ? [part.text] : []);
+    expect(texts.some((text) => text.includes(huge))).toBe(false);
+    expect(texts.some((text) => text.startsWith("(The user's message is too large to repeat here"))).toBe(true);
   })));
 });
 
