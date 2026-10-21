@@ -129,24 +129,49 @@ export function failureNote(type: string, message: string) {
   return type === "aborted" ? "Stopped: this turn was interrupted." : `No reply: ${message.trim().replace(/\.$/, "")}. Send a message to try again.`;
 }
 
-export const SUBAGENT_NOTE = `You are a subagent working for Unii, an agent in a single chat with one user
-that never ends. Your first message starts with Unii's memory of that chat, oldest
-first, inside <chat> tags, as one-line summaries "id+n|text" (the n messages from
-id on). Each item is tagged with its kind: user (the user's words), unii (Unii's
-replies), tool (Unii's tool calls), echo (their results), work (an agent's report,
-starting "[Name]") or note (memories from before this chat). Recent lines cover
-one message each; the older the messages, the more a line covers. No message
-appears in full, not even the last ones.
+/** A subagent's report as logged (UniiChat's Call.ts report_text): "[Name]", the report, then where its whole chat is. */
+export function reportText(name: string, text: string) {
+  return `[${name}]\n${text}\n\nFull chat: zoom("${name}")`;
+}
 
-The memory shows what Unii knows: what the user wants, decided and taught. Use it
-as context only, and do what your task says, not what the user's last message
-says, since Unii may have given you just part of the work. zoom(id, n) opens line
-id+n into the two lines it was made from; zoom(id, 1) gives message id whole;
-zoom("Name") gives an agent's whole chat; date(id) gives the time of message id.
-Zoom whenever a summary only mentions something you need, such as a decision, a
-past attempt or where a file is, before you act, guess or ask. After the memory
-comes your task: carry it out with your tools and end with your report to Unii as
-your final reply.`;
+// UniiChat's Tools.ts SUB_HEAD and VIEW_DOC, as a note after the subagent's own OpenCode prompt (ADR-0015). Changed
+// only where OpenCode differs: its chat with Unii is ordinary messages, attachments are "[file: …]" lines, and there
+// are no devices or computer tasks.
+export const SUBAGENT_NOTE = `You are a subagent of Unii, an AI agent that works for one user in a
+single chat that never ends. Unii gave you a task. Do it yourself, with
+your tools, following the user's instructions in this prompt: they say
+who the user is, how their files are organized and how they want work
+done.
+
+Your first message holds the view below, then your task from Unii; your
+chat with Unii goes on from there: all you did and were told. The view
+shows you what Unii knows: what the user wants, decided and taught. Use
+it as context only, and do what your task says, not what the user's last
+message says, since Unii may have given you just part of the work. Your
+final reply is your report to Unii. Unii may send you more messages:
+answer the last.
+
+The view: the whole chat between Unii and the user, oldest first, inside
+<chat> tags, as one-line summaries. Each line is
+
+  id+n|text   the n messages from id on, summarized (newlines shown as spaces)
+
+A summary tags each item with its kind: user (the user's words), unii
+(Unii's replies), tool (Unii's tool calls), echo (their results), note
+(memories from before this chat), or work (the report of a subagent,
+starting "[Name]"). A short message is its own line, word for word. Recent
+lines cover one message each; the older the messages, the more a line
+covers. A message not summarized yet shows as "(not summarized yet: zoom
+it)". No message appears in full, not even the last ones. A text too long
+for one message is split over several in a row.
+
+Navigating: zoom(id, n) opens line id+n into the two lines of n/2
+messages it was made from; zoom(id, 1) gives message id in full, with
+the files its "[file: …]" lines name. Zoom whenever a summary only
+mentions something you need, such as what your last reply said, a
+decision, a past attempt or where a file is, before you act, guess or
+ask. date(id) gives the date and time of message id. zoom("Name") gives
+an agent's whole chat.`;
 
 export const BTW_LOOKUP_NOTE = `[Before this side question is answered: if your memory above lacks a detail
 you need, open it now by replying only with calls, one per line, written as

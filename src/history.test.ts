@@ -116,7 +116,7 @@ describe("history log items", () => {
       checkpoint(), idle("msg_idle"),
     ];
     expect(items(rows, { name })).toEqual([
-      { kind: "work", text: "[explore-1] line one\n\nline two", date: time.created, src: "msg_report" },
+      { kind: "work", text: "[explore-1]\nline one\n\nline two\n\nFull chat: zoom(\"explore-1\")", date: time.created, src: "msg_report" },
       { kind: "user", text: "instructions", date: time.created, src: "msg_skill" },
       { kind: "echo", text: "$ pwd\n[exited]\n", date: time.created, src: "msg_shell" },
     ]);
@@ -168,7 +168,7 @@ describe("context request", () => {
   });
 
   test("report rewrite keeps the synthetic id and the full report in one part", () => {
-    const report = `[explore-1] ${"r".repeat(30001)}`;
+    const report = `[explore-1]\n${"r".repeat(30001)}\n\nFull chat: zoom("explore-1")`;
     const output = request([msg("user", "msg_new"), msg("user", "msg_report", wrapper("old"))], { reports: new Map([["msg_report", report]]) });
     expect(output[1]).toEqual({ role: "user", id: "msg_report", content: [{ type: "text", text: report, cache: { type: "ephemeral" } }] });
   });

@@ -110,7 +110,7 @@ Victor has since released his code, [VictorTaelin/UniiChat](https://github.com/V
 - "Too long" retries resend the first request with one note ([0058](docs/adr/0058-too-long-retry-single-note.md))
 - failed and stopped turns leave a `note` in memory ([0059](docs/adr/0059-failed-turns-leave-a-note.md))
 - a bad zoom lists the tree's roots ([0060](docs/adr/0060-zoom-error-lists-roots.md))
-- the subagent note explains the view ([0061](docs/adr/0061-subagent-note-explains-the-view.md))
+- the subagent note explains the view ([0061](docs/adr/0061-subagent-note-explains-the-view.md)), in the source's own words, and reports end with `Full chat: zoom("Name")` ([0064](docs/adr/0064-subagent-report-and-note.md))
 - options ([0054](docs/adr/0054-plugin-options.md))
 - tool-free 128k-token compaction, unheaded merge inputs, explicit turn heading, refreshed rules, subagent readiness, paginated zoom, independent background-maintained views, endpoint scheduling, TTL cache single-flight, and indexed bounded-retention storage ([0063](docs/adr/0063-current-source-fidelity.md))
 

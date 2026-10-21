@@ -21,13 +21,13 @@ A new decision gets the next number; a changed decision gets a new record, and t
 | [0011](0011-no-capture-exclusions.md) | No capture exclusions | Accepted |
 | [0012](0012-ui.md) | Popup | Accepted, extended by ADR-0044, ADR-0047 and ADR-0049 |
 | [0013](0013-codemode-catalog.md) | Code Mode catalog in the system prompt **(deviation)** | Accepted |
-| [0014](0014-subagents-always-run-in-the-background.md) | Subagents always run in the background | Accepted |
+| [0014](0014-subagents-always-run-in-the-background.md) | Subagents always run in the background | Accepted, report text amended by ADR-0064 |
 | [0015](0015-subagent-system-prompt.md) | Subagents keep their own system prompt **(deviation)** | Accepted |
 | [0016](0016-long-text-split-size.md) | Long-text split size | Accepted |
 | [0017](0017-compaction-failure-during-the-r-6-wait.md) | Compaction failure while a turn waits | Accepted |
 | [0018](0018-turn-boundary.md) | Turn boundary | Accepted |
 | [0019](0019-per-turn-state-format.md) | Per-turn state format | Accepted |
-| [0020](0020-subagent-reports-in-the-request.md) | Subagent reports in the request | Accepted |
+| [0020](0020-subagent-reports-in-the-request.md) | Subagent reports in the request | Accepted, report text amended by ADR-0064 |
 | [0021](0021-view-size.md) | View size | Superseded by ADR-0063 |
 | [0022](0022-compaction-view-on-a-chat-view-merge.md) | Compaction view after a chat-view merge | Superseded by ADR-0063 |
 | [0023](0023-formats.md) | Record formats | Accepted |
@@ -68,6 +68,7 @@ A new decision gets the next number; a changed decision gets a new record, and t
 | [0058](0058-too-long-retry-single-note.md) | "Too long" retries resend the first request with one note | Accepted |
 | [0059](0059-failed-turns-leave-a-note.md) | Failed and stopped turns leave a note | Accepted |
 | [0060](0060-zoom-error-lists-roots.md) | A bad zoom lists the tree's roots | Accepted |
-| [0061](0061-subagent-note-explains-the-view.md) | The subagent note explains the view | Accepted |
+| [0061](0061-subagent-note-explains-the-view.md) | The subagent note explains the view | Amended by ADR-0064 |
 | [0062](0062-imports-block-the-first-turn.md) | Imported turns block the first turn | Accepted |
 | [0063](0063-current-source-fidelity.md) | Released-source requests, independent views, scheduling, caching and indexed retention | Accepted; amends earlier recipe-era decisions |
+| [0064](0064-subagent-report-and-note.md) | Subagent reports and note as in the released source | Accepted |

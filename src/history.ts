@@ -1,7 +1,7 @@
 import type { Schema } from "effect";
 import type { SessionMessage } from "@opencode/schema/session-message";
 import type { ContentPart, Message, SystemPart } from "@opencode/ai";
-import { failureNote, TURN_HEAD } from "./prompts.ts";
+import { failureNote, reportText, TURN_HEAD } from "./prompts.ts";
 import { echoText, toolResultSrc, toolText, type Kind } from "./record.ts";
 
 export type Row = Schema.Codec.Encoded<typeof SessionMessage.Info>;
@@ -77,7 +77,7 @@ export function items(rows: readonly Row[], opts: { name: (childID: string) => s
     }
     if (row.type === "synthetic" && row.metadata?.source === "subagent") {
       if (typeof row.metadata.childID !== "string") throw new Error("Subagent report has no childID");
-      result.push({ kind: "work", text: `[${opts.name(row.metadata.childID)}] ${subagentReport(row.text)}`, date, src: row.id });
+      result.push({ kind: "work", text: reportText(opts.name(row.metadata.childID), subagentReport(row.text)), date, src: row.id });
       continue;
     }
     if (row.type === "shell") {
