@@ -5,7 +5,7 @@ import * as tree from "./tree.ts";
 import * as view from "./view.ts";
 import * as prompts from "./prompts.ts";
 import { WorkQueue } from "./queue.ts";
-import { Store, chatDir, type StoreError } from "./store.ts";
+import { Store, chatDir, type ImportBatch, type StoreError } from "./store.ts";
 import { Archive } from "./archive.ts";
 import { DEFAULT_ENGINE, type EngineSettings } from "./settings.ts";
 
@@ -32,6 +32,13 @@ const emptyUsage = (): Usage => ({ calls: 0, ms: 0 });
 // `tries` bounds the recipe's "Too long" loop. Both are set from the plugin options.
 export const COMPACTION = Object.freeze({ timeoutMs: DEFAULT_ENGINE.timeoutMs, tries: DEFAULT_ENGINE.tries });
 const key = (ref: tree.Ref) => `${ref[0]}:${ref[1]}`;
+
+/** How many nodes have their last message in [a, b): an import's, all built once it is done. */
+export function importNodes(a: number, b: number) {
+  let n = 0;
+  for (let w = 1; w <= b; w *= 2) n += Math.max(0, Math.floor(b / w) - Math.ceil((a + 1) / w) + 1);
+  return n;
+}
 function extension(mime: string): string {
   const type = mime.split(";")[0]!.trim().toLowerCase();
   const known: Record<string, string> = { "image/jpeg": "jpg", "image/svg+xml": "svg", "text/plain": "txt", "text/markdown": "md", "audio/mpeg": "mp3", "application/octet-stream": "bin" };
@@ -59,13 +66,16 @@ export class Chat {
   private T: number;
   private pending: number;
   private snapshot: string | undefined;
+  /** The import under way, as import.json keeps it (none: none). */
+  private importing: ImportBatch | undefined;
   private readonly lookup: view.Lookup = (l, i) => this.unpersisted.has(key([l, i])) ? undefined : this.archive.node(l, i);
 
   private constructor(private readonly store: Store, private readonly deps: Deps, loaded: {
     archive: Archive; view?: tree.Ref[]; compView?: tree.Ref[]; batch: { chat: boolean; compaction: boolean }; system?: string;
   }) {
     this.archive = loaded.archive;
-    this.settings = structuredClone(deps.settings ?? DEFAULT_ENGINE);
+    this.settings = { ...DEFAULT_ENGINE, ...structuredClone(deps.settings ?? DEFAULT_ENGINE) };
+    this.importing = store.loadImport();
     this.T = this.archive.count();
     this.queue = this.makeQueue();
     this.pending = this.archive.pending();
@@ -75,14 +85,18 @@ export class Chat {
   }
 
   private makeQueue() {
-    return new WorkQueue(this.T, [], this.settings.concurrency, {
+    const side = (i: number) => this.archive.record(i)?.imported ? 1 : 0;
+    const queue = new WorkQueue(this.T, [], this.settings.concurrency, {
       has: (ref) => !this.unpersisted.has(key(ref)) && this.archive.has(ref),
-      missing: (from, limit) => [...new Set([
-        ...this.archive.missing(from, limit),
-        ...[...this.unpersisted.values()].filter(({ ref }) => ref[0] === 0 && ref[1] >= from).map(({ ref }) => ref[1]),
+      missing: (from, limit, s) => [...new Set([
+        ...this.archive.missing(from, limit, s),
+        ...[...this.unpersisted.values()].filter(({ ref }) => ref[0] === 0 && ref[1] >= from && (s === undefined || side(ref[1]) === s)).map(({ ref }) => ref[1]),
       ])].sort((a, b) => a - b).slice(0, limit),
-      ready: (end, limit) => this.archive.ready(end, limit),
-    });
+      ready: (end, limit, s) => this.archive.ready(end, limit, s),
+    }, this.settings.importLeaves);
+    // An import's summaries build while it runs, unless paused (Memory.ts `hold`).
+    queue.held[1] = this.importing === undefined || this.importing.paused;
+    return queue;
   }
 
   static open = Effect.fn("Chat.open")(function* (dir: string, deps: Deps): Effect.fn.Return<Chat, StoreError> {
@@ -196,11 +210,12 @@ export class Chat {
         yield* self.notify();
       }
       const starts: tree.Ref[] = [];
+      let built = false;
       while (true) {
         const work = self.queue.drain((ref) => {
           const rec = ref[0] === 0 ? self.archive.record(ref[1])! : undefined;
-          return rec ? tree.leafText(rec.kind, rec.text) : tree.mergeText(...tree.children(ref).map((child) => self.lookup(...child)!) as [string, string]);
-        }, self.settings.concurrency - self.queue.inFlight.size);
+          return rec ? tree.leafText(record.shownKind(rec), rec.text) : tree.mergeText(...tree.children(ref).map((child) => self.lookup(...child)!) as [string, string]);
+        }, Number.POSITIVE_INFINITY);
         starts.push(...work.start);
         for (const [ref, text] of work.instant) self.unpersisted.set(key(ref), { ref, text });
         for (const [at, [ref, text]] of work.instant.entries()) {
@@ -216,7 +231,12 @@ export class Chat {
           self.queue.built(ref);
         }
         if (!work.instant.length) break;
+        built = true;
+      }
+      // Fit once all instant nodes are in, as Memory.pump does: a batch may merge into them.
+      if (built) {
         yield* self.maintain();
+        yield* self.checkImport();
         yield* self.notify();
       }
       for (const ref of starts) {
@@ -230,7 +250,7 @@ export class Chat {
   private task(ref: tree.Ref) {
     if (ref[0] === 0) {
       const rec = this.archive.record(ref[1])!;
-      return prompts.leafTask(rec.i, rec.kind, rec.text);
+      return prompts.leafTask(rec.i, record.shownKind(rec), rec.text);
     }
     const [a, b] = tree.children(ref);
     return prompts.mergeTask(tree.name(...a), tree.name(...b), tree.first(...ref), tree.last(...ref), view.flat(this.lookup(...a)!), view.flat(this.lookup(...b)!));
@@ -239,7 +259,7 @@ export class Chat {
   // A node's source as one line, cut to the node limit: the line of a compaction that returned none.
   private clippedSource(ref: tree.Ref) {
     const source = ref[0] === 0
-      ? `${this.archive.record(ref[1])!.kind}: ${this.archive.record(ref[1])!.text}`
+      ? `${record.shownKind(this.archive.record(ref[1])!)}: ${this.archive.record(ref[1])!.text}`
       : tree.children(ref).map((child) => this.lookup(...child)!).join("\n");
     return record.cutUtf8(source.replace(/\s*(\r\n|\r|\n)\s*/g, " "), tree.NODE_LIMIT);
   }
@@ -307,16 +327,18 @@ export class Chat {
         const saved = Exit.isSuccess(result) ? yield* self.persist(ref, result.value).pipe(Effect.exit) : result;
         if (Exit.isSuccess(saved)) {
           self.queue.built(ref);
-          yield* self.maintain();
           // A retried node succeeded: the error no longer describes the chat's state.
           if (self.queue.failedNodes.size === 0) self.lastError = undefined;
         } else {
           self.queue.failed(ref);
           self.lastError = Cause.pretty(saved.cause);
         }
-        yield* self.notify();
-        // Other ready work must not wait for a failed node's retry.
+        // Other ready work must not wait for a failed node's retry. As Memory.job: the instant
+        // nodes it readies first, then the views fit.
         yield* self.pump(false);
+        yield* self.maintain();
+        yield* self.checkImport();
+        yield* self.notify();
       }).pipe(Effect.uninterruptible));
     }).pipe(Effect.catchCause((cause) => Effect.gen(function* () {
       self.lastError = Cause.pretty(cause);
@@ -328,13 +350,19 @@ export class Chat {
   // sources are absent, after the last record still present); undefined if nothing was undone or
   // no record is present at all (e.g. the session context starts after a checkpoint).
   // Source base of the latest record, undefined for an empty log.
+  // Imported records are no session's own messages, so an undo never looks at them.
   latestSource(): string | undefined {
-    return this.T > 0 ? this.archive.record(this.T - 1)!.src.split(":")[0]! : undefined;
+    const i = this.archive.lastOwn();
+    return i === undefined ? undefined : this.archive.record(i)!.src.split(":")[0]!;
   }
 
   undoneFrom(present: (base: string) => boolean): number | undefined {
+    let next: number | undefined;
     for (let i = this.T - 1; i >= 0; i--) {
-      if (present(this.archive.record(i)!.src.split(":")[0]!)) return i + 1 < this.T ? i + 1 : undefined;
+      const rec = this.archive.record(i)!;
+      if (rec.imported) continue;
+      if (present(rec.src.split(":")[0]!)) return next;
+      next = i;
     }
     return undefined;
   }
@@ -344,6 +372,11 @@ export class Chat {
     const self = this;
     return this.mutex.withPermits(1)(Effect.gen(function* () {
       if (!Number.isSafeInteger(k) || k < 0 || k >= self.T) return [] as string[];
+      // An undo never takes an import with it: the messages before it stay.
+      if (self.archive.importedFrom(k)) {
+        yield* Effect.logWarning(`UniiChat kept records from ${k} on: an import follows them`);
+        return [] as string[];
+      }
       const chat = view.cut(self.chat.lines, k);
       const comp = view.cut(self.comp.lines, k);
       const bases = new Set<string>();
@@ -397,8 +430,12 @@ export class Chat {
     });
   }
 
+  /** The view's lines built (Memory.view): an import's not summarized yet are not shown. */
   renderView() {
-    return view.blocks(this.chat.lines.map((ref) => view.renderLine(ref, this.lookup(...ref))));
+    return view.blocks(this.chat.lines.flatMap((ref) => {
+      const text = this.lookup(...ref);
+      return text === undefined ? [] : [view.renderLine(ref, text)];
+    }));
   }
 
   zoom(id: number | string, n = 1, at = 0): Effect.Effect<ToolResult, ChatError | StoreError> {
@@ -422,7 +459,7 @@ export class Chat {
       for (const match of (at === 0 ? rec.text : "").matchAll(/^\[file: .* (\S+) → (files\/[^\]\n]+)\]$/gm)) {
         files.push({ mime: match[1]!, data: yield* self.store.readFile(match[2]!) });
       }
-      return { text: `${id}+0|${rec.kind}: ${record.page(rec.text, at)}`, ...(files.length ? { files } : {}) };
+      return { text: `${id}+0|${record.shownKind(rec)}: ${record.page(rec.text, at)}`, ...(files.length ? { files } : {}) };
     });
   }
 
@@ -475,6 +512,78 @@ export class Chat {
   }
 
   hasTools() { return this.toolsReady; }
+
+  /**
+   * An import (Server.ts Chat.ingest): past messages logged at the chat's end, flagged imported, as
+   * one write, then summarized on their own side, which no turn waits on (Memory.settle). Refused
+   * while another runs. A message logged before (by its src) is skipped, so importing again brings
+   * only what is new. Files come without their data, as names.
+   */
+  logImport(items: readonly Item[]): Effect.Effect<{ logged: number; a: number; b: number }, ChatError | StoreError> {
+    const self = this;
+    return this.mutex.withPermits(1)(Effect.gen(function* () {
+      if (self.closed) return yield* Effect.fail(new ChatError({ message: "Chat closed" }));
+      if (self.importing !== undefined) return yield* Effect.fail(new ChatError({ message: "An import is under way: import again once it ends." }));
+      const a = self.T;
+      const recs: record.LogRecord[] = [];
+      const seen = new Set<string>();
+      for (const item of items) {
+        const bare = { ...item, files: item.files?.map(({ name, mime }) => ({ name, mime })) };
+        for (const page of yield* self.pages(bare)) {
+          if (seen.has(page.src) || self.archive.source(page.src) !== undefined) continue;
+          seen.add(page.src);
+          recs.push({ ...page, i: a + recs.length, imported: true });
+        }
+      }
+      if (recs.length === 0) return { logged: 0, a, b: a };
+      yield* self.store.appendRecords(recs);
+      self.T += recs.length;
+      self.pending += recs.length;
+      self.queue.append(self.T);
+      self.importing = { a, b: self.T, paused: false, said: recs.filter((rec) => rec.kind !== "note").length };
+      yield* self.store.saveImport(self.importing);
+      self.queue.held[1] = false;
+      yield* self.maintain(true);
+      yield* self.pump();
+      yield* self.notify();
+      return { logged: recs.length, a, b: self.T };
+    }).pipe(Effect.uninterruptible));
+  }
+
+  /** How far the import running is: its nodes built of all it takes (none: no import runs). */
+  importStatus() {
+    if (this.importing === undefined) return undefined;
+    const { a, b, paused, said } = this.importing;
+    const unpersisted = [...this.unpersisted.values()].filter(({ ref }) => tree.last(...ref) >= a && tree.last(...ref) < b).length;
+    return { a, b, said, paused, built: this.archive.builtIn(a, b) + unpersisted, total: importNodes(a, b), running: this.queue.running(1) };
+  }
+
+  /** An import paused (no summary of it starts; those running end) or resumed. */
+  pauseImport(paused: boolean): Effect.Effect<void, ChatError | StoreError> {
+    const self = this;
+    return this.mutex.withPermits(1)(Effect.gen(function* () {
+      if (self.importing === undefined) return yield* Effect.fail(new ChatError({ message: "No import is running." }));
+      self.importing = { ...self.importing, paused };
+      yield* self.store.saveImport(self.importing);
+      self.queue.held[1] = paused;
+      yield* self.maintain();
+      yield* self.pump();
+      yield* self.notify();
+    }).pipe(Effect.uninterruptible));
+  }
+
+  // An import whose nodes are all built is done (Server.ts Chat.digest): its file goes.
+  private checkImport() {
+    const self = this;
+    return Effect.gen(function* () {
+      const status = self.importStatus();
+      if (status === undefined || status.built < status.total) return;
+      self.importing = undefined;
+      self.queue.held[1] = true;
+      yield* self.store.saveImport(undefined);
+      yield* self.maintain();
+    });
+  }
   hasSource(base: string) { return this.archive.hasBase(base); }
   /** The message a source was logged as (its first page); undefined if it never was. */
   recordIndex(src: string) { return this.archive.source(src); }

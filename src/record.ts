@@ -7,7 +7,13 @@ export interface LogRecord {
   size: number;
   date: string;
   src: string;
+  /** From an import (a past session), not this chat: its replies and tool calls are another AI's. */
+  imported?: true;
 }
+
+/** A message's kind as models read it: an imported chat's AI (its replies and calls) is "ai", not Unii (Memory.show). */
+export const shownKind = (rec: { kind: Kind; imported?: true }): Kind | "ai" =>
+  rec.imported && (rec.kind === "unii" || rec.kind === "tool") ? "ai" : rec.kind;
 
 export function utf8Size(s: string) {
   return new TextEncoder().encode(s).length;

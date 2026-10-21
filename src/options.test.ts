@@ -15,8 +15,8 @@ describe("options", () => {
   });
 
   test("engine settings are per instance and source defaults stay immutable", () => {
-    const settings = engineSettings(parse({ view: { chat: { high: 2000, low: 1000 } }, compaction: { timeoutMs: 1000, tries: 2, concurrency: 3 } }));
-    expect(settings).toEqual({ chat: { high: 2000, low: 1000 }, compaction: COMPACTION_BUDGET, timeoutMs: 1000, tries: 2, concurrency: 3 });
+    const settings = engineSettings(parse({ view: { chat: { high: 2000, low: 1000 } }, compaction: { timeoutMs: 1000, tries: 2, concurrency: 3 }, import: { leaves: 1 } }));
+    expect(settings).toEqual({ chat: { high: 2000, low: 1000 }, compaction: COMPACTION_BUDGET, timeoutMs: 1000, tries: 2, concurrency: 3, importLeaves: 1 });
     settings.chat.high = 3000;
     expect(CHAT_BUDGET.high).toBe(128000);
     expect(COMPACTION.tries).toBe(5);

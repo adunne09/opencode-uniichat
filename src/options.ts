@@ -34,6 +34,10 @@ export const Schema = z.object({
     /** Compaction view byte budget (recipe: 32000/16000). */
     compaction: budget.default({ high: 32000, low: 16000 }),
   }).prefault({}),
+  import: z.object({
+    /** An import's messages summarized at once (UniiChat: 64). At 1 each sees every message before it; merges still run at compaction.concurrency. */
+    leaves: positive.default(64),
+  }).prefault({}),
   btw: z.object({
     /** Memory lookups (zoom/date) before a /btw answer; 0 answers from the view only. */
     lookupSteps: z.number().int().nonnegative().default(8),
@@ -72,7 +76,7 @@ export function modelRef(spec: string, variant?: string) {
 
 /** Settings belong to the plugin instance, never process-global mutable state. */
 export const engineSettings = (options: Options): EngineSettings => ({
-  concurrency: options.compaction.concurrency, tries: options.compaction.tries,
+  concurrency: options.compaction.concurrency, importLeaves: options.import.leaves, tries: options.compaction.tries,
   timeoutMs: options.compaction.timeoutMs,
   chat: { ...options.view.chat }, compaction: { ...options.view.compaction },
 });

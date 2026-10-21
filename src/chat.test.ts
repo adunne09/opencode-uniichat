@@ -419,7 +419,9 @@ test("missing views replay durable leaves on restart and pending batch flags are
   const store = await run(Store.open(dir));
   await run(store.appendRecord({ i: 0, kind: "user", text: "x", size: 1, date: new Date(item(0).date).toISOString(), src: "x:0" }));
   const chat = await run(Chat.open(dir, deps()));
-  expect(chat.renderView()).toEqual(blocks(["0+1|(not summarized yet: zoom it)"]));
+  // A line not built is left out of the view the model reads (Memory.view); it is still a view line.
+  expect(chat.renderView()).toEqual(blocks([]));
+  expect(chat.status().lines).toBe(1);
   await run(store.saveViews([[0, 0]], [[0, 0]], { chat: true, compaction: true }));
   const restored = await run(Chat.open(dir, deps()));
   await run(restored.log([item(1)]));
@@ -552,7 +554,7 @@ test("an ambiguous instant write is not built until the retained text is flushed
   try {
     await run(chat.log([item(0, "short")]));
     expect(chat.status().pending).toBe(1);
-    expect(chat.renderView().tail).toContain("not summarized yet");
+    expect(chat.renderView().tail).not.toContain("0+1|");
     await run(chat.setTools([]));
     expect(chat.status().pending).toBe(0);
     expect((await run(Chat.open(dir, deps()))).renderView()).toEqual(chat.renderView());
@@ -744,4 +746,67 @@ test("closing a chat interrupts model calls and releases summary waiters", async
     expect((yield* Fiber.join(waiting))._tag).toBe("Failure");
     expect((yield* Effect.result(chat.log([item(1)])))._tag).toBe("Failure");
   })));
+});
+
+test("an import builds on its own side: turns wait only for the chat's messages, and it reads as ai", async () => {
+  await run(Effect.gen(function* () {
+    const fake = yield* controlled();
+    const dir = temp();
+    const chat = yield* Chat.open(dir, fake.deps);
+    yield* ready(chat);
+    yield* chat.log([item(0, "short")]);
+    const past = [
+      { kind: "note" as const, text: "OpenCode session in /work, from 2026-08-03 10:12 (imported)", date: 1, src: "import:ses_a" },
+      { kind: "user" as const, text: "U".repeat(600), date: 2, src: "import:ses_a:msg_1" },
+      { kind: "unii" as const, text: "R".repeat(600), date: 3, src: "import:ses_a:msg_2:0" },
+    ];
+    expect(yield* chat.logImport(past)).toEqual({ logged: 3, a: 1, b: 4 });
+    expect(chat.importStatus()).toMatchObject({ a: 1, b: 4, said: 2, paused: false, total: 6 });
+    // Another import waits for this one; the same messages again are skipped.
+    expect((yield* Effect.result(chat.logImport(past)))._tag).toBe("Failure");
+    // The chat's own message after it builds, and a turn after it doesn't wait for the import.
+    yield* chat.log([item(9, "after")]);
+    yield* chat.awaitSummarized();
+    const calls = [yield* Queue.take(fake.calls), yield* Queue.take(fake.calls)];
+    const tasks = calls.map(({ input }) => input.turns.at(-1)!.parts.find((part) => part.text.startsWith("Compaction:"))!.text);
+    expect(tasks.some((task) => task.includes("<input>\nai: RRR"))).toBe(true);
+    expect(chat.renderView().blocks.join("") + chat.renderView().tail).not.toContain("not summarized");
+    // An undo of the chat's own messages never takes the import with it.
+    expect(yield* chat.rewind(1)).toEqual([]);
+    expect(chat.latestSource()).toBe("msg_9");
+    for (const { reply } of calls) yield* Deferred.succeed(reply, output("summary"));
+    for (let k = 0; k < 20 && chat.importStatus() !== undefined; k++) {
+      yield* flush;
+      const next = yield* Queue.poll(fake.calls);
+      if (next._tag === "Some") yield* Deferred.succeed(next.value.reply, output("summary"));
+    }
+    expect(chat.importStatus()).toBeUndefined();
+    expect((yield* chat.zoom(3, 1)).text).toStartWith("3+0|ai: RRR");
+  }));
+});
+
+test("an import paused starts no summary of its own until resumed, and survives a reopen", async () => {
+  await run(Effect.gen(function* () {
+    const fake = yield* controlled();
+    const dir = temp();
+    const one = { ...fake.deps, settings: { ...DEFAULT_ENGINE, importLeaves: 1 } };
+    const chat = yield* Chat.open(dir, one);
+    yield* ready(chat);
+    yield* chat.logImport([1, 2].map((k) => ({ kind: "user" as const, text: "U".repeat(600), date: k, src: `import:ses_a:msg_${k}` })));
+    // One leaf at a time: the second waits for the first, and a pause holds it.
+    const first = yield* Queue.take(fake.calls);
+    yield* chat.pauseImport(true);
+    yield* Deferred.succeed(first.reply, output("summary"));
+    yield* flush;
+    expect(fake.seen).toHaveLength(1);
+    yield* chat.close();
+    const reopened = yield* Chat.open(dir, one);
+    yield* ready(reopened);
+    expect(reopened.importStatus()).toMatchObject({ paused: true, built: 1, total: 3 });
+    yield* flush;
+    expect(fake.seen).toHaveLength(1);
+    yield* reopened.pauseImport(false);
+    const second = yield* Queue.take(fake.calls);
+    expect(second.input.turns.at(-1)!.parts.some((part) => part.text.includes("compress message 1"))).toBe(true);
+  }));
 });

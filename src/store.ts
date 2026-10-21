@@ -20,6 +20,8 @@ export class StoreError extends Data.TaggedError("StoreError")<{
 
 export interface StoredNode { l: number; i: number; text: string; size: number }
 export interface Batch { chat: boolean; compaction: boolean }
+/** An import under way: its messages [a, b), whether its user paused it, how many it said (notes aside). */
+export interface ImportBatch { a: number; b: number; paused: boolean; said: number }
 export interface TornLine { path: string; line: number }
 export interface Loaded {
   records: LogRecord[];
@@ -230,6 +232,16 @@ export class Store {
     });
   }
 
+  /** Many records in one write and one index scan, in the file of the day they are logged (an import's). */
+  appendRecords(recs: readonly LogRecord[]): Effect.Effect<void, StoreError> {
+    return attempt("appendRecords", join(this.dir, "main"), () => {
+      if (recs.length === 0) return;
+      const path = `main/${day(new Date())}.jsonl`;
+      append(join(this.dir, path), undefined, recs.map((rec) => JSON.stringify(rec)).join("\n"));
+      this.archive?.appended(path);
+    });
+  }
+
   appendNode(node: StoredNode): Effect.Effect<void, StoreError> {
     return attempt("appendNode", join(this.dir, "tree"), () => {
       const path = `tree/${day(new Date())}.jsonl`;
@@ -296,6 +308,25 @@ export class Store {
     return attempt("saveSystem", path, () => {
       atomic(path, text);
     });
+  }
+
+  /** The import running (Server.ts's import.json): its messages [a, b) and whether it is paused; none once done. */
+  saveImport(batch: ImportBatch | undefined): Effect.Effect<void, StoreError> {
+    const path = join(this.dir, "import.json");
+    return attempt("saveImport", path, () => {
+      if (batch === undefined) fs.rmSync(path, { force: true });
+      else atomic(path, JSON.stringify(batch));
+    });
+  }
+
+  loadImport(): ImportBatch | undefined {
+    const text = optional(join(this.dir, "import.json"));
+    if (text === undefined) return undefined;
+    try {
+      const value = JSON.parse(text) as Partial<ImportBatch>;
+      if (Number.isSafeInteger(value.a) && Number.isSafeInteger(value.b)) return { a: value.a!, b: value.b!, paused: value.paused === true, said: Number(value.said) || 0 };
+    } catch {}
+    return undefined;
   }
 
   appendAgent(name: string, rec: LogRecord): Effect.Effect<void, StoreError> {

@@ -40,13 +40,15 @@ export class Archive {
   private readonly cache = new Map<string, string>();
   private cacheChars = 0;
   private closed = false;
+  // Which nodes are built, by "l:i": a view of thousands asks often, mostly of nodes not built yet.
+  private readonly built = new Set<string>();
   constructor(readonly dir: string) {
     const file = join(dir, "archive.index.sqlite");
     const open = () => {
       const db = new Database(file, { create: true });
       try { db.exec(`PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048; PRAGMA busy_timeout=5000;
         CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, size INTEGER, mtime REAL, ino INTEGER);
-        CREATE TABLE IF NOT EXISTS records(scope TEXT, i INTEGER, src TEXT, base TEXT, path TEXT, at INTEGER, length INTEGER, chars INTEGER, PRIMARY KEY(scope,i));
+        CREATE TABLE IF NOT EXISTS records(scope TEXT, i INTEGER, src TEXT, base TEXT, path TEXT, at INTEGER, length INTEGER, chars INTEGER, side INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(scope,i));
         CREATE INDEX IF NOT EXISTS sources ON records(scope,src);
         CREATE INDEX IF NOT EXISTS bases ON records(scope,base);
         CREATE TABLE IF NOT EXISTS nodes(l INTEGER, i INTEGER, end INTEGER, path TEXT, at INTEGER, length INTEGER, PRIMARY KEY(l,i));
@@ -55,6 +57,14 @@ export class Archive {
         CREATE INDEX IF NOT EXISTS ready_order ON ready(end,l DESC);
         CREATE TABLE IF NOT EXISTS agents(child TEXT PRIMARY KEY, name TEXT UNIQUE);`); }
       catch (error) { db.close(); throw error; }
+      // An index from before imports has no side: built again from the logs.
+      if (!(db.query("PRAGMA table_info(records)").all() as { name: string }[]).some((column) => column.name === "side")) {
+        db.exec(`DROP TABLE records; DELETE FROM files; DELETE FROM nodes; DELETE FROM ready;
+          CREATE TABLE records(scope TEXT, i INTEGER, src TEXT, base TEXT, path TEXT, at INTEGER, length INTEGER, chars INTEGER, side INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(scope,i));
+          CREATE INDEX IF NOT EXISTS sources ON records(scope,src);
+          CREATE INDEX IF NOT EXISTS bases ON records(scope,base);`);
+      }
+      db.exec("CREATE INDEX IF NOT EXISTS sides ON records(scope,side,i);");
       return db;
     };
     try { this.db = open(); } catch (error) {
@@ -88,6 +98,7 @@ export class Archive {
       if (!Number.isSafeInteger(value.l) || value.l < 0 || value.l > 52 || !Number.isSafeInteger(value.i) || value.i < 0 ||
           !Number.isSafeInteger((value.i + 1) * 2 ** value.l) || typeof value.text !== "string") return;
       this.db.query("INSERT OR IGNORE INTO nodes VALUES (?,?,?,?,?,?)").run(value.l, value.i, (value.i + 1) * 2 ** value.l, path, at, length);
+      this.built.add(`${value.l}:${value.i}`);
       this.db.query("DELETE FROM ready WHERE l=? AND i=?").run(value.l, value.i);
       const l = value.l + 1, i = Math.floor(value.i / 2);
       if (this.has([value.l, value.i % 2 === 0 ? value.i + 1 : value.i - 1]) && !this.has([l, i])) {
@@ -97,7 +108,7 @@ export class Archive {
     }
     if (!Number.isSafeInteger(value.i) || value.i < 0 || typeof value.src !== "string" || typeof value.text !== "string") return;
     const scope = path.startsWith("main/") ? "main" : `agent:${path.slice(7, -6)}`;
-    this.db.query("INSERT OR IGNORE INTO records VALUES (?,?,?,?,?,?,?,?)").run(scope, value.i, value.src, value.src.split(":")[0], path, at, length, `${value.i}|${value.kind}: ${value.text}\n\n`.length);
+    this.db.query("INSERT OR IGNORE INTO records VALUES (?,?,?,?,?,?,?,?,?)").run(scope, value.i, value.src, value.src.split(":")[0], path, at, length, `${value.i}|${value.kind}: ${value.text}\n\n`.length, value.imported === true ? 1 : 0);
     if (scope !== "main" && value.i === 0) this.db.query("INSERT OR IGNORE INTO agents VALUES (?,?)").run(value.src.split(":")[0], scope.slice(6));
   }
   /** Rescan changed tails; rewrites invalidate their addresses. A torn line is ignored. */
@@ -121,6 +132,8 @@ export class Archive {
         JOIN nodes b ON b.l=a.l AND b.i=a.i+1 LEFT JOIN nodes p ON p.l=a.l+1 AND p.i=a.i/2
         WHERE a.i%2=0 AND p.i IS NULL;`);
     })();
+    this.built.clear();
+    for (const { l, i } of this.db.query("SELECT l,i FROM nodes").all() as { l: number; i: number }[]) this.built.add(`${l}:${i}`);
   }
   private forget(path: string) {
     this.db.query("DELETE FROM records WHERE path=?").run(path);
@@ -145,7 +158,9 @@ export class Archive {
   appended(path: string) { this.db.transaction(() => this.scan(path))(); }
   record(i: number, scope = "main") { return this.read<LogRecord>(this.db.query("SELECT path,at,length FROM records WHERE scope=? AND i=?").get(scope, i) as Place | null); }
   node(l: number, i: number) {
-    const key = `${l}:${i}`, cached = this.cache.get(key);
+    const key = `${l}:${i}`;
+    if (!this.built.has(key)) return undefined;
+    const cached = this.cache.get(key);
     if (cached !== undefined) { this.cache.delete(key); this.cache.set(key, cached); return cached; }
     const value = this.read<{ text: string }>(this.db.query("SELECT path,at,length FROM nodes WHERE l=? AND i=?").get(l, i) as Place | null)?.text;
     if (value !== undefined && value.length <= CACHE_CHARS) {
@@ -159,15 +174,33 @@ export class Archive {
     }
     return value;
   }
-  has([l, i]: Ref) { return this.db.query("SELECT 1 FROM nodes WHERE l=? AND i=?").get(l, i) !== null; }
+  has([l, i]: Ref) { return this.built.has(`${l}:${i}`); }
   count(scope = "main") { return (this.db.query("SELECT COALESCE(MAX(i)+1,0) AS n FROM records WHERE scope=?").get(scope) as { n: number }).n; }
   source(src: string, scope = "main") { return (this.db.query("SELECT i FROM records WHERE scope=? AND src=? ORDER BY i LIMIT 1").get(scope, src) as { i: number } | null)?.i; }
   hasBase(base: string) { return this.db.query("SELECT 1 FROM records WHERE scope='main' AND base=? LIMIT 1").get(base) !== null; }
-  missing(from: number, limit: number): number[] {
-    return (this.db.query("SELECT r.i FROM records r LEFT JOIN nodes n ON n.l=0 AND n.i=r.i WHERE r.scope='main' AND r.i>=? AND n.i IS NULL ORDER BY r.i LIMIT ?").all(from, limit) as { i: number }[]).map((r) => r.i);
+  /** The messages from `from` on not built, of a side (0: the chat's, 1: an import's; none: both), in order. */
+  missing(from: number, limit: number, side?: number): number[] {
+    const where = side === undefined ? "" : " AND r.side=" + (side === 1 ? 1 : 0);
+    return (this.db.query(`SELECT r.i FROM records r LEFT JOIN nodes n ON n.l=0 AND n.i=r.i WHERE r.scope='main' AND r.i>=?${where} AND n.i IS NULL ORDER BY r.i LIMIT ?`).all(from, limit) as { i: number }[]).map((r) => r.i);
   }
-  ready(end: number, limit: number): Ref[] {
-    return (this.db.query("SELECT l,i FROM ready WHERE end<=? ORDER BY end,l DESC LIMIT ?").all(end, limit) as { l: number; i: number }[]).map(({ l, i }) => [l, i]);
+  /** Merges ready to build up to `end`, of a side: a node's is its last message's (Memory.side). */
+  ready(end: number, limit: number, side?: number): Ref[] {
+    const sql = side === undefined
+      ? "SELECT l,i FROM ready WHERE end<=? ORDER BY end,l DESC LIMIT ?"
+      : `SELECT y.l,y.i FROM ready y JOIN records r ON r.scope='main' AND r.i=y.end-1 WHERE y.end<=? AND r.side=${side === 1 ? 1 : 0} ORDER BY y.end,y.l DESC LIMIT ?`;
+    return (this.db.query(sql).all(end, limit) as { l: number; i: number }[]).map(({ l, i }) => [l, i]);
+  }
+  /** The nodes built whose last message is in [a, b): an import's, as it builds. */
+  builtIn(a: number, b: number) {
+    return (this.db.query("SELECT COUNT(*) AS n FROM nodes WHERE end>? AND end<=?").get(a, b) as { n: number }).n;
+  }
+  /** The last message of the chat's own (not imported); undefined if none. */
+  lastOwn(): number | undefined {
+    return (this.db.query("SELECT MAX(i) AS i FROM records WHERE scope='main' AND side=0").get() as { i: number | null }).i ?? undefined;
+  }
+  /** Whether a message from `from` on was imported. */
+  importedFrom(from: number) {
+    return this.db.query("SELECT 1 FROM records WHERE scope='main' AND side=1 AND i>=? LIMIT 1").get(from) !== null;
   }
   pending() { return (this.db.query("SELECT COUNT(*) AS n FROM records r LEFT JOIN nodes n ON n.l=0 AND n.i=r.i WHERE r.scope='main' AND n.i IS NULL").get() as { n: number }).n; }
   agentName(child: string, type: string) {
