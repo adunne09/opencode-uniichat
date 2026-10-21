@@ -16,12 +16,13 @@ import * as env from "./env.ts";
 import * as history from "./history.ts";
 import * as turn from "./turn.ts";
 import { toMessages } from "./messages.ts";
+import { readLine } from "./importer.ts";
 import { chatDir } from "./store.ts";
 import { btwMemory, lookupCalls, lookupResults, rolledNote, systemText, stateText, tooLargeToRepeat, WHOLE, ZOOM_DESCRIPTION, DATE_DESCRIPTION } from "./prompts.ts";
 import { UniiChatRpc, statusValue } from "./rpc.ts";
 
 export class IntegrationError extends Data.TaggedError("UniiChatIntegrationError")<{ message: string }> {}
-type Chat = Pick<engine.Chat, "log" | "logAgent" | "agentName" | "system" | "setSystem" | "setTools" | "awaitSummarized" | "renderView" | "zoom" | "date" | "status" | "latestSource" | "undoneFrom" | "rewind"> & Partial<Pick<engine.Chat, "hasSource" | "recordIndex">>;
+type Chat = Pick<engine.Chat, "log" | "logAgent" | "agentName" | "system" | "setSystem" | "setTools" | "awaitSummarized" | "renderView" | "zoom" | "date" | "status" | "latestSource" | "undoneFrom" | "rewind"> & Partial<Pick<engine.Chat, "hasSource" | "recordIndex" | "logImport" | "importStatus" | "pauseImport">>;
 export interface IntegrationOptions {
   /** Plugin options; defaults to `ctx.options`. */
   options?: unknown;
@@ -479,6 +480,40 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
     archive: (input) => Effect.gen(function* () {
       const chat = yield* get(yield* target(input.sessionID));
       return (yield* ("name" in input ? chat.zoom(input.name, 1, input.at) : chat.zoom(input.id, input.n, input.at))).text;
+    }).pipe(Effect.orDie),
+    // An import (Server.ts Chat.ingest), refused amid a turn: its lines logged at the chat's end,
+    // their summaries built on their own side, which no turn waits on. Before the chat's first turn
+    // there is no system prompt yet: compactions get Unii's prompt and the AGENTS.md files.
+    import: ({ sessionID, file }) => Effect.gen(function* () {
+      if ((yield* parent(sessionID)) !== undefined) return yield* Effect.fail(error("A subagent's session can't import: import into the chat's."));
+      if (!(yield* state(sessionID)).on) return yield* Effect.fail(error("UniiChat is off in this session: run /unii on first."));
+      const rows = yield* readHistory(sessionID);
+      if (rows.length > 0 && rows.at(-1)!.type !== "idle") return yield* Effect.fail(error("Unii is answering: import again once it ends."));
+      const chat = yield* get(sessionID);
+      if (!chat.logImport) return yield* Effect.fail(error("This chat can't import."));
+      const lines: engine.Item[] = [];
+      for (const raw of readFileSync(file, "utf8").split("\n")) {
+        if (raw.trim() === "") continue;
+        const line = readLine(yield* Effect.try({ try: () => JSON.parse(raw), catch: () => error("An import line is not JSON.") }));
+        if (typeof line === "string") return yield* Effect.fail(error(line));
+        lines.push(line);
+      }
+      if (chat.system() === undefined) {
+        const session = yield* ctx.session.get({ sessionID: id(sessionID) });
+        const location = { directory: session.location.directory, projectDirectory: ctx.location.project.directory };
+        yield* chat.setSystem(systemText(settings.prompts.system, undefined, yield* env.agentsMd(location), undefined));
+      }
+      return yield* chat.logImport(lines);
+    }).pipe(Effect.orDie),
+    importStatus: ({ sessionID }) => Effect.gen(function* () {
+      const chat = yield* get(sessionID);
+      return chat.importStatus?.() ?? null;
+    }).pipe(Effect.orDie),
+    importPause: ({ sessionID, paused }) => Effect.gen(function* () {
+      const chat = yield* get(sessionID);
+      if (!chat.pauseImport) return yield* Effect.fail(error("This chat can't import."));
+      yield* chat.pauseImport(paused);
+      return { paused };
     }).pipe(Effect.orDie),
   });
   yield* ctx.event.subscribe().pipe(Stream.runForEach((event) => {

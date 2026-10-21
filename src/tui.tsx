@@ -44,7 +44,7 @@ function usageLabel(usage: Status["lastTurn"]): string {
 
 const LINE = /^(\d+)\+(\d+)\|/;
 // A summary or message starts with its kind ("user:", "echo1269:", "tool1203:"...).
-const KIND = /^(user|unii|tool|echo|work|note)(\d*):/;
+const KIND = /^(user|unii|tool|echo|work|ai|note)(\d*):/;
 // Blank rows between list entries, so wrapped lines don't run into each other.
 const ROW_GAP = 1;
 const WORK = /^work: \[([^\]\s]+)\]/;

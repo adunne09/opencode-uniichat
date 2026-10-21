@@ -61,6 +61,20 @@ export const UniiChatRpc = Rpc.define({
       ]),
       output: z.string(),
     },
+    /** An import: a JSON-lines file of import lines (scripts/import.ts), logged at the chat's end. */
+    import: {
+      input: session.extend({ file: z.string() }),
+      output: z.object({ logged: z.number(), a: z.number(), b: z.number() }),
+    },
+    /** The import running: its nodes built of all it takes; null once done (or none ran). */
+    importStatus: {
+      input: session,
+      output: z.object({
+        a: z.number(), b: z.number(), said: z.number(), paused: z.boolean(),
+        built: z.number(), total: z.number(), running: z.number(),
+      }).nullable(),
+    },
+    importPause: { input: session.extend({ paused: z.boolean() }), output: z.object({ paused: z.boolean() }) },
   },
   events: {},
 });

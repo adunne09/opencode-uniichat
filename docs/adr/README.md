@@ -70,6 +70,7 @@ A new decision gets the next number; a changed decision gets a new record, and t
 | [0060](0060-zoom-error-lists-roots.md) | A bad zoom lists the tree's roots | Accepted |
 | [0061](0061-subagent-note-explains-the-view.md) | The subagent note explains the view | Amended by ADR-0064 |
 | [0062](0062-imports-block-the-first-turn.md) | Imported turns block the first turn | Accepted |
-| [0063](0063-current-source-fidelity.md) | Released-source requests, independent views, scheduling, caching and indexed retention | Accepted; amends earlier recipe-era decisions |
+| [0063](0063-current-source-fidelity.md) | Released-source requests, independent views, scheduling, caching and indexed retention | Accepted; amends earlier recipe-era decisions; import lane amended by ADR-0066 |
 | [0064](0064-subagent-report-and-note.md) | Subagent reports and note as in the released source | Accepted |
 | [0065](0065-turn-rollover.md) | A turn too large for its context rolls over into the view | Accepted |
+| [0066](0066-imports.md) | Import past sessions as UniiChat imports past chats | Accepted |

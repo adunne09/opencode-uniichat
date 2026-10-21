@@ -69,6 +69,7 @@ They go in the plugin's `options` object. Settings are isolated per plugin insta
 | `compaction.concurrency` | `64` | Compaction calls in flight and the pending-leaf window. Leaves and merges are ordered by context endpoint, merges first at ties. |
 | `view.chat` | `{ "high": 128000, "low": 64000 }` | Chat view byte budget: when it passes `high`, it is merged down to `low`. |
 | `view.compaction` | `{ "high": 32000, "low": 16000 }` | Independent compaction view budget, covering only the completed leaf prefix. |
+| `import.leaves` | `64` | Imported messages summarized at once (UniiChat: 64). At `1` each one's summary sees every message before it; merges still run `compaction.concurrency` at once. |
 | `btw.lookupSteps` | `8` | Memory lookups (zoom/date) allowed before a `/btw` answer. `0` answers from the view only. |
 | `btw.maxTokens` | `4000` | Output limit for one lookup call. |
 | `prompts.system` | the recipe's prompt, agent name "Unii" | The system prompt. Your AGENTS.md, the skills list and the Code Mode catalog are added to it. |
@@ -114,14 +115,33 @@ Victor has since released his code, [VictorTaelin/UniiChat](https://github.com/V
 - options ([0054](docs/adr/0054-plugin-options.md))
 - tool-free 128k-token compaction, unheaded merge inputs, explicit turn heading, refreshed rules, subagent readiness, paginated zoom, independent background-maintained views, endpoint scheduling, TTL cache single-flight, and indexed bounded-retention storage ([0063](docs/adr/0063-current-source-fidelity.md))
 
-One difference from that code is kept on purpose. Victor's turns don't wait for an import to be summarized. Here the first turn after switch-on waits, so the model sees the whole session ([0062](docs/adr/0062-imports-block-the-first-turn.md)).
+Imports of past sessions follow that code: they build on their own side and no turn waits for them ([0066](docs/adr/0066-imports.md)). One difference is kept on purpose: switching UniiChat on in a session with earlier turns logs them as the chat's own, and the first turn waits for them, so the model sees the whole session ([0062](docs/adr/0062-imports-block-the-first-turn.md)).
+
+## Importing past sessions
+
+`scripts/import.ts` seeds a chat with your past OpenCode sessions, as UniiChat's `/import` does with Claude Code and Codex. Start a new session, run `/unii on`, then, from this checkout:
+
+```sh
+bun scripts/import.ts                                   # what it would import, and the cost; imports nothing
+bun scripts/import.ts --sessions                        # and the list of sessions
+bun scripts/import.ts --session ses_… --go              # import into that chat, and watch the summaries build
+bun scripts/import.ts --session ses_… --watch           # how far they are
+bun scripts/import.ts --session ses_… --pause           # or --resume
+```
+
+- **The plugin does the work.** It must be loaded by the OpenCode service the script talks to (the background one, or `--server`). The script reads the sessions, writes them as JSON lines, and the plugin logs them and summarizes them on the compaction model.
+- **What is kept.** Every top-level session but the chat's, oldest first, each after a `note` (`OpenCode session "Title" in /dir, from 2026-08-03 10:12 (imported)`): the user's words and the AI's replies, in 30,000-character pages, files as names. With `--tools`, also tool calls and results. Never reasoning, OpenCode's compaction summaries, injected prompts, skills' instructions or subagents' sessions. A fork brings only what came after it when its parent comes too. `--since YYYY-MM-DD`, `--exclude DIR`, `--skip ses_…` and `--only ses_…` choose.
+- **How it reads.** Imported messages go at the chat's end, flagged imported; their replies and tool calls read as `ai` ("another AI's replies and tool calls, from an imported chat; not yours"), as in UniiChat.
+- **No turn waits for it.** As in UniiChat, an import's summaries build on their own side: a turn waits only for the chat's own messages, and its view leaves out imported lines not summarized yet. Meanwhile, UniiChat can answer with a partial tree. Another import waits until this one is done; one paused stays paused across restarts.
+- **Again.** Each message's source names its session and entry, so importing again brings only messages new since then.
+- **Cost.** The estimate is UniiChat's price model for its compactor (Haiku 5.5 at high effort), measured on its real imports.
 
 ## Limitations
 
 - OpenCode's generate API returns text only. The popup shows compaction call counts and times, but not token usage or cost. When a compaction returns no text, the reason is not reported; the node uses its source clipped.
 - A compaction's throwaway session may show briefly as a child session.
 - Cache single-flight covers plugin-owned model calls. It waits for successful HTTP response headers, or successful completion on transports without HTTP hooks; native provider cache reuse is not measured by this plugin.
-- Indexed logs bound retained history bodies; OpenCode still owns the full transcript and the current raw turn. Imported earlier turns use the same queue as live history, rather than UniiChat's separate billing/import lanes.
+- Indexed logs bound retained history bodies; OpenCode still owns the full transcript and the current raw turn.
 - A turn that outgrows the model's context rolls over: when OpenCode asks to compact it, its steps so far move into the view as summaries and only later steps stay raw ([0065](docs/adr/0065-turn-rollover.md)). OpenCode decides when, from the last request it sent, so a first request already over the limit still fails.
 - Tested with Bun 1.4, including macOS regression coverage.
 

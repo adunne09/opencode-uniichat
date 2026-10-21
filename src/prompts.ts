@@ -16,6 +16,7 @@ Each message has a kind:
 - tool: Unii's tool calls
 - echo: tool results
 - work: an agent's report, starting "[Name]"
+- ai: another AI's replies and tool calls, from an imported chat; not yours
 - note: memories from before this chat
 
 The summaries form a binary tree: each message is compressed into a line (a

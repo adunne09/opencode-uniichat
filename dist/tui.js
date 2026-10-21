@@ -60,7 +60,24 @@ var UniiChatRpc = Rpc.define({
         session.extend({ name: z.string(), at: z.number().int().nonnegative().optional() })
       ]),
       output: z.string()
-    }
+    },
+    import: {
+      input: session.extend({ file: z.string() }),
+      output: z.object({ logged: z.number(), a: z.number(), b: z.number() })
+    },
+    importStatus: {
+      input: session,
+      output: z.object({
+        a: z.number(),
+        b: z.number(),
+        said: z.number(),
+        paused: z.boolean(),
+        built: z.number(),
+        total: z.number(),
+        running: z.number()
+      }).nullable()
+    },
+    importPause: { input: session.extend({ paused: z.boolean() }), output: z.object({ paused: z.boolean() }) }
   },
   events: {}
 });
@@ -97,7 +114,7 @@ function usageLabel(usage) {
   return parts.join("  \xB7  ");
 }
 var LINE = /^(\d+)\+(\d+)\|/;
-var KIND = /^(user|unii|tool|echo|work|note)(\d*):/;
+var KIND = /^(user|unii|tool|echo|work|ai|note)(\d*):/;
 var ROW_GAP = 1;
 var WORK = /^work: \[([^\]\s]+)\]/;
 function Popup(props) {

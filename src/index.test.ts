@@ -4,7 +4,7 @@ import type { Plugin } from "@opencode/plugin/effect";
 import type { SessionContext, SessionCompaction } from "@opencode/plugin/effect/session";
 import { SessionMessage } from "@opencode/schema/session-message";
 import { Session } from "@opencode/schema/session";
-import { DateTime, Deferred, Effect, Fiber, Queue, Schema, Stream } from "effect";
+import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Queue, Schema, Stream } from "effect";
 import { integrate, toWire, type IntegrationOptions } from "./index.ts";
 import type { Row, Item } from "./history.ts";
 import { blocks } from "./view.ts";
@@ -542,4 +542,40 @@ test("a row our schema copy rejects still reaches the log as a wire row", () => 
   // A newer OpenCode row: a compaction from a schema with an extra required key we lack, and a missing one.
   const newer = { type: "compaction", id: "msg_cp", status: "completed", reason: "auto", time: { created: DateTime.makeUnsafe(1000) }, future: { at: DateTime.makeUnsafe(2000) } };
   expect(toWire(newer as unknown as SessionMessage.Info)).toEqual({ type: "compaction", id: "msg_cp", status: "completed", reason: "auto", time: { created: 1000 }, future: { at: 2000 } } as unknown as Row);
+});
+
+test("an import into a fresh chat: refused while off or answering, then logged, and the first turn doesn't wait for it", async () => {
+  const f = fixture([], false);
+  await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+    const calls: string[] = [];
+    const chat = yield* Chat.open(mkdtempSync(join(tmpdir(), "uniichat-import-")), {
+      compact: (input) => Effect.sync(() => { calls.push(input.system); }).pipe(Effect.andThen(Effect.never)),
+    });
+    f.options.get = () => Effect.succeed(chat);
+    yield* integrate(f.ctx, f.options);
+    const body = join(mkdtempSync(join(tmpdir(), "uniichat-body-")), "import.jsonl");
+    writeFileSync(body, [
+      { kind: "note", text: "OpenCode session in /work, from 2026-08-03 10:12 (imported)", date: "2026-08-03T10:12:00Z", src: "import:ses_a" },
+      { kind: "user", text: "U".repeat(600), date: "2026-08-03T10:13:00Z", src: "import:ses_a:msg_1" },
+      { kind: "unii", text: "R".repeat(600), date: "2026-08-03T10:14:00Z", src: "import:ses_a:msg_2" },
+    ].map((line) => JSON.stringify(line)).join("\n"));
+    const refused = (reason: string) => Effect.exit(f.rpc().import({ sessionID: f.sessionID, file: body })).pipe(
+      Effect.map((exit) => expect(Exit.isFailure(exit) && Cause.pretty(exit.cause)).toContain(reason)));
+    yield* refused("run /unii on");
+    yield* f.rpc().set({ sessionID: f.sessionID, on: true });
+    f.rows([user("msg_busy")]);
+    yield* refused("Unii is answering");
+    f.rows([]);
+    expect(yield* f.rpc().import({ sessionID: f.sessionID, file: body })).toEqual({ logged: 3, a: 0, b: 3 });
+    // Before any turn, compactions run on Unii's prompt.
+    for (let k = 0; k < 50 && calls.length === 0; k++) yield* Effect.yieldNow;
+    expect(calls[0]).toStartWith(SYSTEM_PROMPT);
+    expect(yield* f.rpc().importStatus({ sessionID: f.sessionID })).toMatchObject({ a: 0, b: 3, said: 2, paused: false });
+    // The first turn goes on while the import's summaries still run (never answered here).
+    f.rows([user("msg_new")]);
+    const event = f.event();
+    yield* f.hooks.get("context")!(event).pipe(Effect.timeout(2000));
+    expect(event.messages.at(-1)!.content.flatMap((part) => part.type === "text" ? [part.text] : []).at(-1)).toBe("task");
+    expect(yield* f.rpc().importPause({ sessionID: f.sessionID, paused: true })).toEqual({ paused: true });
+  })));
 });
