@@ -122,6 +122,17 @@ export function items(rows: readonly Row[], opts: { name: (childID: string) => s
   return result;
 }
 
+/**
+ * A row whose items can no longer change: any but the session's latest row (`latest`), once a step
+ * has finished with its tools, or a shell command has ended. Rows that give no items count too.
+ */
+export function isSettled(row: Row, latest: string | undefined): boolean {
+  if (row.id === latest) return false;
+  if (row.type === "shell") return row.status !== "running";
+  if (row.type !== "assistant") return true;
+  return row.time.completed !== undefined && row.content.every((part) => part.type !== "tool" || part.state.status === "completed" || part.state.status === "error");
+}
+
 export function selectLogged(parts: readonly Segment[], hasSrcPrefix: (id: string) => boolean, currentEnabled: boolean): Segment[] {
   return parts.filter((part, index) => (currentEnabled && index === parts.length - 1) || [...part.ids].some(hasSrcPrefix));
 }

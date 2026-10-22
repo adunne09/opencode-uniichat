@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Message } from "@opencode/ai";
 import { blocks } from "./view.ts";
-import { btwRequest, buildRequest, cutTurn, isStub, stubCut, STUB_SUMMARY, EMPTY_CATALOG, extractCatalog, extractSkills, items, segments, selectLogged, subagentReport, turnKey, type RequestMessage, type Row } from "./history.ts";
+import { btwRequest, buildRequest, cutTurn, isSettled, isStub, stubCut, STUB_SUMMARY, EMPTY_CATALOG, extractCatalog, extractSkills, items, segments, selectLogged, subagentReport, turnKey, type RequestMessage, type Row } from "./history.ts";
 
 const time = { created: 1700000000000 };
 const model = { id: "claude-sonnet-4-5", providerID: "anthropic" };
@@ -250,4 +250,19 @@ describe("btw request", () => {
     expect(texts(out[0]!).slice(-2)).toEqual(["side?", "note"]);
     expect(texts(out[0]!).join("")).not.toContain("reply");
   });
+});
+
+test("a row is settled once it can no longer change, never while it is the latest", () => {
+  const done = { ...time, completed: time.created + 10 };
+  const step = (content: Extract<Row, { type: "assistant" }>["content"], at: Row["time"] = done): Row => ({ ...assistant(content), time: at });
+  const finished = step([{ type: "text", text: "reply" }, tool("t1", { status: "completed", input: { path: "a" }, content: [{ type: "text", text: "file a" }] })]);
+  expect(isSettled(finished, "msg_later")).toBe(true);
+  expect(isSettled(finished, "msg_a")).toBe(false);
+  expect(isSettled(step([{ type: "text", text: "reply" }], time), "msg_later")).toBe(false);
+  expect(isSettled(step([tool("t2", { status: "running", input: { path: "a" }, metadata: {} })]), "msg_later")).toBe(false);
+  const shell: Row = { type: "shell", id: "msg_shell", shellID: "shell_1", command: "pwd", status: "running", time };
+  expect(isSettled(shell, "msg_later")).toBe(false);
+  expect(isSettled({ ...shell, status: "exited" }, "msg_later")).toBe(true);
+  expect(isSettled(user("msg_new"), "msg_later")).toBe(true);
+  expect(isSettled(user("msg_new"), "msg_new")).toBe(false);
 });

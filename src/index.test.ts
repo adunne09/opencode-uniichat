@@ -414,6 +414,42 @@ test("status projects finite wire usage without leaking undefined, DateTime, or 
   })));
 });
 
+test("a step logs only rows that may still change, not the whole session again", async () => {
+  const reply = (id: string, text: string, completed?: number): Row => ({ type: "assistant", id, content: [{ type: "text", text }], agent: "build", model: { id: "model", providerID: "anthropic" }, time: { created: 1001, ...(completed === undefined ? {} : { completed }) } });
+  const f = fixture([user("msg_a"), reply("msg_ra", "a done", 1002), idle("msg_i1"), user("msg_b")]);
+  const batches: string[][] = [];
+  const log = f.chat.log;
+  f.chat.log = (items) => { batches.push(items.map((item) => item.src)); return log(items); };
+  const childBatches: string[][] = [];
+  f.chat.logAgent = (_name, items) => Effect.sync(() => { childBatches.push(items.map((item) => item.src)); return undefined; });
+  await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+    yield* integrate(f.ctx, f.options);
+    yield* f.hooks.get("context")!(f.event([msg("user", "task", "msg_b")]));
+    expect(f.logged.map((item) => item.src)).toEqual(["msg_a", "msg_ra:0", "msg_b"]);
+    // The next step: msg_rb is still the latest row, so only it and the user's latest input go again.
+    f.rows([user("msg_a"), reply("msg_ra", "a done", 1002), idle("msg_i1"), user("msg_b"), reply("msg_rb", "first")]);
+    batches.length = 0;
+    yield* f.hooks.get("context")!(f.event([msg("user", "task", "msg_b"), msg("assistant", "first", "msg_rb")]));
+    expect(batches.flat()).toEqual(["msg_b", "msg_rb:0"]);
+    // msg_rb finished and a later row came: it is logged once more, then never again.
+    f.rows([user("msg_a"), reply("msg_ra", "a done", 1002), idle("msg_i1"), user("msg_b"), reply("msg_rb", "first", 1003), reply("msg_rc", "second")]);
+    batches.length = 0;
+    yield* f.hooks.get("context")!(f.event([msg("user", "task", "msg_b"), msg("assistant", "first", "msg_rb"), msg("assistant", "second", "msg_rc")]));
+    expect(batches.flat()).toEqual(["msg_rb:0", "msg_rc:0"]);
+    batches.length = 0;
+    yield* f.hooks.get("context")!(f.event([msg("user", "task", "msg_b"), msg("assistant", "first", "msg_rb"), msg("assistant", "second", "msg_rc")]));
+    expect(batches.flat()).toEqual(["msg_rc:0"]);
+    expect(f.logged.map((item) => item.src)).toEqual(["msg_a", "msg_ra:0", "msg_b", "msg_rb:0", "msg_rc:0"]);
+    // A subagent's steps are logged the same way.
+    f.rows([user("msg_child")]);
+    yield* f.hooks.get("context")!(f.event([msg("user", "child task", "msg_child")], f.childID));
+    f.rows([user("msg_child"), reply("msg_c1", "step", 1004), reply("msg_c2", "next")]);
+    yield* f.hooks.get("context")!(f.event([msg("user", "child task", "msg_child")], f.childID));
+    yield* f.hooks.get("context")!(f.event([msg("user", "child task", "msg_child")], f.childID));
+    expect(childBatches).toEqual([[`${f.childID}:msg_child`], [`${f.childID}:msg_child`, `${f.childID}:msg_c1:0`, `${f.childID}:msg_c2:0`], [`${f.childID}:msg_c2:0`]]);
+  })));
+});
+
 test("an undone turn is dropped from memory before the next turn, and the redo is logged", async () => {
   const reply = (id: string, text: string): Row => ({ type: "assistant", id, content: [{ type: "text", text }], agent: "build", model: { id: "model", providerID: "anthropic" }, time: { created: 1001 } });
   const f = fixture([user("msg_a")]);

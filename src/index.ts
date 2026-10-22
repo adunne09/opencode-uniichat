@@ -36,6 +36,17 @@ const memos = new Map<string, turn.Memo>();
 const parents = new Map<string, string | undefined>();
 const locks = new Map<string, Semaphore.Semaphore>();
 const indexes = new Map<string, { sources: Set<string>; recovered: boolean }>();
+// Rows already logged that can no longer change, by chat and session. Logging is idempotent but a
+// pass costs a lookup per page and a read-back per file, and with native compaction skipped
+// OpenCode's context is the whole session: so a step logs only rows that may still change.
+const settledRows = new WeakMap<object, Map<string, Set<string>>>();
+function settledFor(chat: object, sessionID: string) {
+  let bySession = settledRows.get(chat);
+  if (!bySession) settledRows.set(chat, bySession = new Map());
+  let rows = bySession.get(sessionID);
+  if (!rows) bySession.set(sessionID, rows = new Set());
+  return rows;
+}
 const error = (cause: unknown) => new IntegrationError({ message: cause instanceof Error ? cause.message : String(cause) });
 const id = (sessionID: string) => Session.ID.make(sessionID);
 
@@ -192,8 +203,10 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
     const agent = report?.metadata?.agent;
     return chat.agentName(childID, typeof agent === "string" ? agent : "agent");
   };
-  const log = Effect.fn(function* (sessionID: string, chat: Chat, rows: readonly history.Row[]) {
-    const items = history.items(rows, { name: (childID) => nameFor(chat, rows, childID) });
+  const log = Effect.fn(function* (sessionID: string, chat: Chat, rows: readonly history.Row[], latest: string | undefined) {
+    const settled = settledFor(chat, sessionID);
+    const todo = rows.filter((row) => !settled.has(row.id));
+    const items = history.items(todo, { name: (childID) => nameFor(chat, rows, childID) });
     const index = indexes.get(sessionID)!;
     const result = yield* chat.log(items).pipe(Effect.exit);
     if (Exit.isFailure(result)) {
@@ -203,6 +216,13 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
       return yield* Effect.failCause(result.cause);
     }
     if (!chat.hasSource) for (const item of items) index.sources.add(item.src.split(":")[0]!);
+    for (const row of todo) if (history.isSettled(row, latest)) settled.add(row.id);
+  });
+  const logChild = Effect.fn(function* (sessionID: string, chat: Chat, name: string, rows: readonly history.Row[]) {
+    const settled = settledFor(chat, sessionID);
+    const todo = rows.filter((row) => !settled.has(row.id));
+    yield* chat.logAgent(name, turn.childItems(sessionID, history.items(todo, { name: (childID) => nameFor(chat, rows, childID) })));
+    for (const row of todo) if (history.isSettled(row, rows.at(-1)?.id)) settled.add(row.id);
   });
   const reconcile = Effect.fn(function* (sessionID: string, chat: Chat, rows: readonly history.Row[], current: boolean, excluded: ReadonlySet<string> = new Set()) {
     let index = indexes.get(sessionID);
@@ -228,14 +248,14 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
         const now = history.segments(rows).at(-1)!.ids;
         const earlier = history.segments(full ?? rows).filter((part) => ![...part.ids].some((id) => now.has(id)));
         for (const part of earlier) {
-          yield* log(sessionID, chat, part.rows.filter((row) => !excluded.has(row.id) && !now.has(row.id)));
+          yield* log(sessionID, chat, part.rows.filter((row) => !excluded.has(row.id) && !now.has(row.id)), (full ?? rows).at(-1)?.id);
         }
         index.recovered = true;
       } else {
         const full = yield* (options.older ?? older)(sessionID, has);
         if (full) {
           for (const part of selected(full, false)) {
-            yield* log(sessionID, chat, part.rows.filter((row) => !excluded.has(row.id)));
+            yield* log(sessionID, chat, part.rows.filter((row) => !excluded.has(row.id)), full.at(-1)?.id);
           }
           index.recovered = true;
         } else if (rows.some(has)) {
@@ -247,7 +267,7 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
         }
       }
     }
-    for (const part of selected(rows, current)) yield* log(sessionID, chat, part.rows.filter((row) => !excluded.has(row.id)));
+    for (const part of selected(rows, current)) yield* log(sessionID, chat, part.rows.filter((row) => !excluded.has(row.id)), rows.at(-1)?.id);
   });
   // OpenCode's /undo deletes the undone messages when the next prompt commits it. Drop their
   // records too, so memory matches the session and the restored files (amends "never delete").
@@ -319,7 +339,7 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
         memo.frozen = chat.renderView();
       }
       const name = chat.agentName(sessionID, event.agent);
-      yield* chat.logAgent(name, turn.childItems(sessionID, history.items(rows, { name: (childID) => nameFor(chat, rows, childID) })));
+      yield* logChild(sessionID, chat, name, rows);
     } else {
       if (first) {
         yield* chat.setSystem(systemText(settings.prompts.system, history.extractCatalog(event.system), yield* env.agentsMd({ ...location, paths: history.instructionPaths(rows, event.system) }), history.extractSkills(event.system)));
@@ -530,7 +550,7 @@ export const integrate = (ctx: Plugin.Context, options: IntegrationOptions = {})
       const rows = yield* readHistory(sessionID);
       if (child) {
         const name = chat.agentName(sessionID, session.agent ?? "agent");
-        yield* chat.logAgent(name, turn.childItems(sessionID, history.items(rows, { name: (childID) => nameFor(chat, rows, childID) })));
+        yield* logChild(sessionID, chat, name, rows);
       } else yield* reconcile(sessionID, chat, rows, false);
     })).pipe(Effect.catchCause((cause) => Effect.logWarning("UniiChat reconciliation failed", cause)));
   }), Effect.forkScoped);

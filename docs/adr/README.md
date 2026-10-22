@@ -74,3 +74,4 @@ A new decision gets the next number; a changed decision gets a new record, and t
 | [0064](0064-subagent-report-and-note.md) | Subagent reports and note as in the released source | Accepted |
 | [0065](0065-turn-rollover.md) | A turn too large for its context rolls over into the view | Accepted |
 | [0066](0066-imports.md) | Import past sessions as UniiChat imports past chats | Accepted |
+| [0067](0067-settled-rows.md) | A step logs only rows that may still change | Accepted |
